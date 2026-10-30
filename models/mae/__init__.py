@@ -1,0 +1,1 @@
+from .models import mae_vit_base_patch16, mae_vit_large_patch16

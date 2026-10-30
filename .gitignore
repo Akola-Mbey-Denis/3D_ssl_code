@@ -1,0 +1,118 @@
+# Checkpoints
+checkpoints/
+**/checkpoints/
+
+# Preprocessed data
+preprocessed_data/
+**/preprocessed_data/
+
+# Overlaps
+overlaps/
+**/overlaps/
+slogs_overlaps/
+**/slogs_overlaps/
+
+# Training logs and outputs
+*_training/
+**/*_training/
+*_slogs/
+**/*_slogs/
+training_logs/
+**/training_logs/
+logs/
+**/logs/
+
+# Slurm output files
+*.out
+*.err
+slurm-*
+
+# Dumps and visualization images (all extensions)
+dumps/
+**/dumps/
+scannet_dumps/
+scannetpp_dumps/
+*.png
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
+*.PNG
+*.bmp
+*.tiff
+*.tif
+*.webp
+
+# CVPR 2027 experiment folders
+cvpr2027/
+cvpr_2027*/
+**/cvpr2027/
+**/cvpr_2027*/
+
+# LDI folders
+ldi*/
+**/ldi*/
+**/*_ldi/
+**/ldi_*/
+
+# Dataset and generated evaluation folders
+scannet_splits/
+scannetpp_lists/
+test_poincar3*/
+**/test_poincar3*/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
+
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.model
+*.onnx
+*.engine
+*.weights
+*.h5
+*.hdf5
+*.msgpack
+*.pkl
+*.pickle
+*.npz
+*.npy
+
+
+# LMDB databases
+*.lmdb
+*.lmdb/
+*.mdb
+*.db
+data.mdb
+lock.mdb
+
+# Point clouds and 3D geometry
+*.ply
+*.pcd
+*.obj
+*.off
+*.stl
+*.glb
+*.gltf
+*.fbx
+*.las
+*.laz
+*.e57
+*.xyz
+*.pts
+*.mesh
+*.3ds
+*.usdz

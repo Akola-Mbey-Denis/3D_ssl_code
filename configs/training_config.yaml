@@ -1,0 +1,13 @@
+loss:
+  _target_: loss.MultitaskLoss
+
+  camera:
+    weight: 5.0
+    loss_type: "l1"
+
+  depth:
+    weight: 1.0
+    gradient_loss_fn: "grad"
+    valid_range: 0.98
+
+  point: null

@@ -1,0 +1,32 @@
+DEPTH_FRUSTRUM_OVERLAP_THRESHOLD: 0.10
+OCCLUSION_THRESHOLD_MIN: 0.40
+OCCLUSION_THRESHOLD_MAX: 0.70
+DEPTH_FRUSTRUM_OVERLAP_THRESHOLD_MIN: 0.10
+DEPTH_FRUSTRUM_OVERLAP_THRESHOLD_MAX: 0.40
+
+
+AUG_CROP: 16
+
+COMMON:
+  IMG_SIZE: 224         # Default image size
+  PATCH_SIZE: 16        # Default patch size
+  AUGS:
+    SCALES: [0.8, 1.2]  # Default augmentation scaling
+  RESCALE: True         # Whether to apply rescaling
+  RESCALE_AUG: False     # Whether to apply augmentation-time rescaling
+  LANDSCAPE_CHECK: False # Enforce landscape orientation
+  IMG_PER_SEQ: 1        # Number of images per sequence
+
+COLOR_JITTER: False 
+COLOR_JITTER_RATIO: 0.50
+
+
+LMDB_PATHS:
+  train: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/taskonomy_resize_train.lmdb
+  val: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/taskonomy_resize_val.lmdb
+  test: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/taskonomy_resize_test.lmdb
+
+  test: /projects/rps/dff6
+
+ROOT_DIR: "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data"
+
