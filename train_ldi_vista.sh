@@ -1,16 +1,18 @@
 #!/bin/bash
 
-GPU_TYPE="h200"
+GPU_TYPE="b200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
-EPOCHS=70
+EPOCHS=140
 
 # ---------------------------
 # Parse flags
 # ---------------------------
 # usage: ./submit_vista_ldi.sh -g b200 -n 2 [-m 512] [-e 70]
-# LDI probe (frozen SSL encoder + LayeredDPTHead) on ScanNet + Matterport3D + ARKitScenes.
-# Global batch 256 = NUM_GPUS x batch_size: 334,059 sequences / 256 = 1,304 steps / epoch (91,280 steps for 70 epochs).
+# LDI probe (frozen SSL encoder + LayeredDPTHead) on all of ScanNet++ + 5,000 Matterport3D + 10,000 ARKitScenes
+# + 10,000 ScanNet sequences per epoch (N @ dataset: N sequences of that dataset per epoch).
+# Global batch 256 = NUM_GPUS x batch_size: ~158,293 ScanNet++ + 25,000 = ~183,293 sequences / 256
+# = ~716 steps / epoch (~50,100 steps for 70 epochs; check the "Train dataset length" in the log).
 while getopts g:n:m:e: flag; do
     case "${flag}" in
         g) GPU_TYPE=${OPTARG};;
@@ -37,7 +39,7 @@ HOSTNAME=$(hostname)
 # ---------------------------
 # Set resources based on host
 # ---------------------------
-MAX_MEMORY=512         # GB
+MAX_MEMORY=640         # GB
 
 # Torch per-GPU share = node CPUs / GPUs and node memory / GPUs (more is rejected:
 # "GPU job setup is not valid")
@@ -100,7 +102,7 @@ mkdir -p vista_ldi_training
 
 sbatch \
   --account=torch_pr_41_courant \
-  --time=24:00:00 \
+  --time=36:00:00 \
   --mem=${MEMORY}G \
   --gres=${GRES} \
   --cpus-per-task=${CPUS} \
@@ -120,10 +122,10 @@ sbatch \
           time cp ${SRC}/*.lmdb \$LMDB_DIR/ && \
           torchrun \
           --nproc_per_node=${NUM_GPUS} \
-          --master_port=8494 \
+          --master_port=8594 \
           finetune_ldi.py \
-          --train_dataset=\"ScanNet_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml') + Matterport3D_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + ARKitScenes_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml')\" \
-          --test_dataset=\"ScanNet_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml') + Matterport3D_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + ARKitScenes_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml')\" \
+          --train_dataset=\"ScannetPP_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml') + 5_000 @ Matterport3D_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + 10_000 @ ARKitScenes_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml') + 30_000 @ ScanNet_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml')\" \
+          --test_dataset=\"ScannetPP_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml') + ScanNet_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml') + Matterport3D_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + ARKitScenes_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml')\" \
           --model=\"vista_base_ldi(num_layers=4)\" \
           --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
           --lr=2e-4 \
@@ -134,4 +136,4 @@ sbatch \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_base_model_downstream_ldi_scannet_matterport_arkitscenes_model_224_x_224_${EPOCHS}ep/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_all_matterport5k_arkitscenes10k_scannet10k_model_224_x_224_${EPOCHS}ep/\""

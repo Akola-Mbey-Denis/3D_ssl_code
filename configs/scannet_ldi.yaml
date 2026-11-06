@@ -18,9 +18,9 @@ COMMON:
   IMG_PER_SEQ: 1        # Number of images per sequence
 
 LMDB_PATHS:
-  train: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/scannet_ldi_train_set.lmdb
-  val: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/scannet_ldi_val_set.lmdb
-  test: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/scannet_ldi_test_set.lmdb
+  train: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/scannet_train_ldi_data.lmdb
+  val: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/scannet_val_ldi_data.lmdb
+  test: /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/scannet_test_ldi_data.lmdb
 
 COLOR_JITTER: False 
 COLOR_JITTER_RATIO: 0.50

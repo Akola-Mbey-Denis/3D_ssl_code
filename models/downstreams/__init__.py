@@ -7,6 +7,9 @@ from .mum import mum_large as mum_large_downstream
 from .vista import vista_base as vista_base_downstream
 from .vista import vista_large as vista_large_downstream
 
+from .vistav2 import vista_base_v2 as vista_basev2_downstream
+from .vistav2 import vista_large_v2 as vista_largev2_downstream
+
 from .muskie import muskie_base as muskie_base_downstream
 from .muskie import muskie_large as muskie_large_downstream
 
@@ -15,3 +18,4 @@ from .mae_ldi import mae_base_ldi
 from .mum_ldi import mum_base_ldi
 from .vista_ldi import vista_base_ldi
 from .muskie_ldi import muskie_base_ldi
+from .poincar3_ldi import poincar3_large_ldi

@@ -290,30 +290,6 @@ def latents_to_rgb_side_by_side(pred_latents, gt_latents, batch_idx=0, sample_id
     return combined
 
 
-# Usage Examples
-if __name__ == "__main__":
-    from torch.utils.tensorboard import SummaryWriter
-    
-    # Create sample data
-    B, S, P, C = 4, 1, 1374, 2048
-    pred_latents = torch.randn(B, S, P, C)
-    gt_latents = torch.randn(B, S, P, C)
-    
-    # Method 1: Convert to RGB
-    pred_rgb = latents_to_rgb_images(pred_latents, method='colormap')
-    print(f"Output shape: {pred_rgb.shape}")  # (4, 1, 3, 1374, 2048)
-    
-    # Method 2: Log to TensorBoard
-    writer = SummaryWriter('runs/latent_visualization')
-    log_latents_to_tensorboard(pred_latents, gt_latents, writer, step=0, prefix='val')
-    
-    # Method 3: Create side-by-side comparison
-    combined = latents_to_rgb_side_by_side(pred_latents, gt_latents, batch_idx=0, sample_idx=0)
-    writer.add_image('val/latent_comparison', combined, 0)
-    
-    writer.close()
-    
-    print("Images logged to TensorBoard!")
 
 def _interleave_imgs(img1, img2):
     res = {}
@@ -570,75 +546,183 @@ def vis_depth_maps_nvs(
         else:
             norm_depth = np.zeros_like(depth)
 
-        norm_depth[~valid] = 0.0  # zero out invalid regions
         color = cmap(norm_depth)  # RGBA
         rgb = (color[..., :3] * 255).astype(np.uint8)
+        
+        rgb[~valid] = 0                          # invalid pixels really black
+
         colored_maps[b] = rgb
 
     return colored_maps
+
+
+def _fit_alignment(pred, gt, valid, mode):
+    """Scale (and shift) mapping pred -> gt on the valid pixels: (s, t) with aligned = s * pred + t."""
+    p, g = pred[valid].astype(np.float64), gt[valid].astype(np.float64)
+    if p.size < 10:
+        return 1.0, 0.0
+    if mode == "scale":                                   # median ratio: robust, keeps 0 at 0
+        return float(np.median(g / np.maximum(p, 1e-6))), 0.0
+    if mode == "scale_shift":                             # least squares (LaRI, z-shift only)
+        A = np.stack([p, np.ones_like(p)], axis=1)
+        (s, t), *_ = np.linalg.lstsq(A, g, rcond=None)
+        return float(s), float(t)
+    raise ValueError(f"unknown align mode {mode!r}")
 
 
 def vis_layered_depth_maps(
     depth_batch: torch.Tensor,
     conf_batch: torch.Tensor = None,
     mask: torch.Tensor = None,
-    percentile: float = 25.0
-) -> np.ndarray:
+    percentile: float = 25.0,
+    gt_batch: torch.Tensor = None,
+    gt_mask: torch.Tensor = None,
+    align: str = "scale",
+    return_alignment: bool = False,
+    mask_to_gt: bool = True,
+):
     """
     Visualize layered depth maps using a colormap, with optional confidence and validity masking.
-    
+    With GT layered depth, the prediction is aligned to the GT scale and coloured on the GT's colour range, so
+    predicted and GT maps are directly comparable.
+
     Args:
-        depth_batch (torch.Tensor): Tensor of shape (B, H, W, L), float32.
+        depth_batch (torch.Tensor): Tensor of shape (B, H, W, L), float32 (predicted, or GT when visualizing GT).
         conf_batch (torch.Tensor, optional): Confidence scores of shape (B, H, W, L).
-        mask (torch.Tensor, optional): Boolean mask of shape (B, H, W, L), where True indicates valid pixels.
+        mask (torch.Tensor, optional): Boolean mask of shape (B, H, W, L), True = valid pixel to draw.
+            Black (invalid) is always: depth <= 0 / nan / inf, outside `mask`, below the confidence percentile,
+            and, when gt_batch is given, where the GT layer does not exist.
         percentile (float): Percentile threshold for confidence masking.
+        gt_batch (torch.Tensor, optional): GT layered depth (B, H, W, L). If given:
+            - the prediction is aligned to GT per image (align), fitted on LAYER 0 pixels where GT is valid and
+              applied to every layer (the hidden layers keep their position relative to the visible surface);
+            - every layer is coloured with the GT's min / max of that layer, so the same colour = the same depth
+              in the GT and in the prediction (visualize the GT with the same call and gt_batch=None,
+              mask=gt_mask: it uses the same per-layer range).
+        gt_mask (torch.Tensor, optional): (B, H, W, L) bool, True where the GT layer exists (default: gt > 0).
+        align (str or None): "scale" (median gt / pred ratio), "scale_shift" (least squares, as LaRI) or None
+            (metric prediction, only the shared colour range).
+        return_alignment (bool): also return the per-image (scale, shift), shape (B, 2).
+        mask_to_gt (bool): with gt_batch, black out the pixels where the GT layer does not exist (default). False
+            keeps the alignment and the GT colour range but draws EVERY predicted pixel, to see what the model
+            predicts where GT has no surface (only depth <= 0 / nan / inf, `mask` and confidence stay black).
 
     Returns:
-        np.ndarray: Array of shape (B, L, H, W, 3), dtype uint8.
+        np.ndarray: Array of shape (B, L, H, W, 3), dtype uint8 (invalid pixels black);
+                    with return_alignment, (colored_maps, alignment (B, 2)).
     """
-    depth_batch = depth_batch.cpu().numpy()
-    if conf_batch is not None:
-        conf_batch = conf_batch.cpu().numpy()
-    if mask is not None:
-        mask = mask.cpu().numpy()
+    to_np = lambda x: x.detach().float().cpu().numpy() if torch.is_tensor(x) else np.asarray(x)
+    depth_batch = np.nan_to_num(to_np(depth_batch).astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    conf_batch = to_np(conf_batch) if conf_batch is not None else None
+    mask = to_np(mask).astype(bool) if mask is not None else None
+    if gt_batch is not None:
+        gt_batch = np.nan_to_num(to_np(gt_batch).astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        gt_mask = to_np(gt_mask).astype(bool) if gt_mask is not None else gt_batch > 0
+        gt_mask &= gt_batch > 0
 
     B, H, W, L = depth_batch.shape
     colored_maps = np.zeros((B, L, H, W, 3), dtype=np.uint8)
+    alignment = np.tile(np.array([1.0, 0.0]), (B, 1))
     cmap = cm.get_cmap('Spectral_r')
 
     for b in range(B):
+        if gt_batch is not None and align is not None:
+            fit_px = gt_mask[b, :, :, 0] & (depth_batch[b, :, :, 0] > 0)
+            alignment[b] = _fit_alignment(depth_batch[b, :, :, 0], gt_batch[b, :, :, 0], fit_px, align)
+        s, t = alignment[b]
+
         for l in range(L):
-            depth = depth_batch[b, :, :, l]
-            depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+            depth = depth_batch[b, :, :, l] * s + t
 
             # Validity mask for this sample/layer
-            valid_mask = np.ones((H, W), dtype=bool)
+            valid_mask = depth_batch[b, :, :, l] > 0              # no depth (0 / nan / inf) -> black
             if mask is not None:
-                valid_mask &= mask[b, :, :, l].astype(bool)
-
-            if conf_batch is not None:
+                valid_mask &= mask[b, :, :, l]
+            if gt_batch is not None and mask_to_gt:
+                valid_mask &= gt_mask[b, :, :, l]                  # no GT layer -> black
+            if conf_batch is not None and np.any(valid_mask):
                 conf = conf_batch[b, :, :, l]
-                if np.any(valid_mask):
-                    thresh = np.percentile(conf[valid_mask], percentile)
-                    valid_mask &= conf > thresh
+                valid_mask &= conf > np.percentile(conf[valid_mask], percentile)
 
-            valid_depth = depth[valid_mask]
-            if valid_depth.size > 0:
-                v_min, v_max = np.min(valid_depth), np.max(valid_depth)
+            # Colour range: the GT's range of this layer if GT is given, else this map's own range
+            if gt_batch is not None and gt_mask[b, :, :, l].any():
+                ref = gt_batch[b, :, :, l][gt_mask[b, :, :, l]]
             else:
-                v_min, v_max = 0, 1  # fallback
+                ref = depth[valid_mask]
+            v_min, v_max = (float(ref.min()), float(ref.max())) if ref.size > 0 else (0.0, 1.0)
 
             if v_max > v_min:
-                norm_depth = (depth - v_min) / (v_max - v_min)
+                norm_depth = np.clip((depth - v_min) / (v_max - v_min), 0.0, 1.0)
             else:
                 norm_depth = np.zeros_like(depth)
 
-            norm_depth[~valid_mask] = 0.0  # Black out invalid pixels
-            color = cmap(norm_depth)
-            rgb = (color[..., :3] * 255).astype(np.uint8)
+            rgb = (cmap(norm_depth)[..., :3] * 255).astype(np.uint8)
+            rgb[~valid_mask] = 0                          # invalid pixels really black
             colored_maps[b, l] = rgb
 
-    return colored_maps
+    return (colored_maps, alignment) if return_alignment else colored_maps
+    
+# def vis_layered_depth_maps(
+#     depth_batch: torch.Tensor,
+#     conf_batch: torch.Tensor = None,
+#     mask: torch.Tensor = None,
+#     percentile: float = 25.0
+# ) -> np.ndarray:
+#     """
+#     Visualize layered depth maps using a colormap, with optional confidence and validity masking.
+    
+#     Args:
+#         depth_batch (torch.Tensor): Tensor of shape (B, H, W, L), float32.
+#         conf_batch (torch.Tensor, optional): Confidence scores of shape (B, H, W, L).
+#         mask (torch.Tensor, optional): Boolean mask of shape (B, H, W, L), where True indicates valid pixels.
+#         percentile (float): Percentile threshold for confidence masking.
+
+#     Returns:
+#         np.ndarray: Array of shape (B, L, H, W, 3), dtype uint8.
+#     """
+#     depth_batch = depth_batch.cpu().numpy()
+#     if conf_batch is not None:
+#         conf_batch = conf_batch.cpu().numpy()
+#     if mask is not None:
+#         mask = mask.cpu().numpy()
+
+#     B, H, W, L = depth_batch.shape
+#     colored_maps = np.zeros((B, L, H, W, 3), dtype=np.uint8)
+#     cmap = cm.get_cmap('Spectral_r')
+
+#     for b in range(B):
+#         for l in range(L):
+#             depth = depth_batch[b, :, :, l]
+#             depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+
+#             # Validity mask for this sample/layer
+#             valid_mask = np.ones((H, W), dtype=bool)
+#             if mask is not None:
+#                 valid_mask &= mask[b, :, :, l].astype(bool)
+
+#             if conf_batch is not None:
+#                 conf = conf_batch[b, :, :, l]
+#                 if np.any(valid_mask):
+#                     thresh = np.percentile(conf[valid_mask], percentile)
+#                     valid_mask &= conf > thresh
+
+#             valid_depth = depth[valid_mask]
+#             if valid_depth.size > 0:
+#                 v_min, v_max = np.min(valid_depth), np.max(valid_depth)
+#             else:
+#                 v_min, v_max = 0, 1  # fallback
+
+#             if v_max > v_min:
+#                 norm_depth = (depth - v_min) / (v_max - v_min)
+#             else:
+#                 norm_depth = np.zeros_like(depth)
+
+#             norm_depth[~valid_mask] = 0.0  # Black out invalid pixels
+#             color = cmap(norm_depth)
+#             rgb = (color[..., :3] * 255).astype(np.uint8)
+#             colored_maps[b, l] = rgb
+
+#     return colored_maps
 
 
 import numpy as np
@@ -711,10 +795,11 @@ def vis_depth_maps(
             else:
                 norm_depth = np.zeros_like(depth)
 
-            norm_depth[~mask] = 0.0  # Zero out masked regions for visualization
+            # norm_depth[~mask] = 0.0  # Zero out masked regions for visualization
 
             color = cmap(norm_depth)  # RGBA
             rgb = (color[..., :3] * 255).astype(np.uint8)
+            rgb[~mask] = 0
             colored_maps[b, s] = rgb
 
     return colored_maps

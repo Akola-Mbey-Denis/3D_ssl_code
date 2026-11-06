@@ -1,16 +1,17 @@
 #!/bin/bash
 
-GPU_TYPE="h200"
+GPU_TYPE="b200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
-EPOCHS=70
+EPOCHS=140
 
 # ---------------------------
 # Parse flags
 # ---------------------------
-# usage: ./submit_muskie_ldi.sh -g b200 -n 2 [-m 512] [-e 70]
-# LDI probe (frozen SSL encoder + LayeredDPTHead) on ScanNet + Matterport3D + ARKitScenes.
-# Global batch 256 = NUM_GPUS x batch_size: 334,059 sequences / 256 = 1,304 steps / epoch (91,280 steps for 70 epochs).
+# usage: ./submit_muskie_ldi_scannetpp.sh -g b200 -n 2 [-m 512] [-e 70]
+# LDI probe (frozen SSL encoder + LayeredDPTHead) on ScanNet++ ONLY (train), validated on ScanNet++ val.
+# Global batch 64 = NUM_GPUS x batch_size: ~158,293 ScanNet++ sequences / 64 = ~2,473 steps / epoch
+# (check the "Train dataset length" in the log).
 while getopts g:n:m:e: flag; do
     case "${flag}" in
         g) GPU_TYPE=${OPTARG};;
@@ -25,7 +26,7 @@ if ! [[ "$NUM_GPUS" =~ ^[1-8]$ ]]; then
     exit 1
 fi
 
-GLOBAL_BATCH=256
+GLOBAL_BATCH=64
 if (( GLOBAL_BATCH % NUM_GPUS != 0 )); then
     echo "Error: global batch ${GLOBAL_BATCH} is not divisible by ${NUM_GPUS} GPUs."
     exit 1
@@ -37,7 +38,7 @@ HOSTNAME=$(hostname)
 # ---------------------------
 # Set resources based on host
 # ---------------------------
-MAX_MEMORY=512          # GB
+MAX_MEMORY=640         # GB
 
 # Torch per-GPU share = node CPUs / GPUs and node memory / GPUs (more is rejected:
 # "GPU job setup is not valid")
@@ -79,17 +80,20 @@ else
 fi
 
 SRC=/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/ldi_lmdbs   # LDI LMDBs are copied from here to node-local disk
+LMDB_GLOB="scannetpp_*.lmdb"   # only the ScanNet++ LMDBs are needed (check the file names in \$SRC)
 
 # ---------------------------
 # Debug output
 # ---------------------------
-echo "Submitting MUSKIE LDI probe job with:"
+echo "Submitting MUSKIE LDI probe job (ScanNet++ only) with:"
 echo "GPU_TYPE = $GPU_TYPE"
 echo "NUM_GPUS = $NUM_GPUS"
 echo "CPUS = $CPUS"
 echo "MEMORY = ${MEMORY}GB"
 echo "GRES = $GRES"
 echo "EPOCHS = $EPOCHS"
+echo "LMDBs = ${SRC}/${LMDB_GLOB}"
+ls ${SRC}/${LMDB_GLOB} >/dev/null 2>&1 || { echo "Error: no ${LMDB_GLOB} in ${SRC}"; exit 1; }
 echo "BATCH_SIZE = $BATCH_SIZE per GPU (global $GLOBAL_BATCH)"
 [ ${#EXTRA_SBATCH[@]} -gt 0 ] && echo "EXTRA = ${EXTRA_SBATCH[*]}"
 
@@ -100,15 +104,15 @@ mkdir -p muskie_ldi_training
 
 sbatch \
   --account=torch_pr_41_courant \
-  --time=24:00:00 \
+  --time=36:00:00 \
   --mem=${MEMORY}G \
   --gres=${GRES} \
   --cpus-per-task=${CPUS} \
   --constraint=${GPU_TYPE} \
-  --job-name="muskie_ldi_${EPOCHS}ep_${GPU_TYPE}_${NUM_GPUS}gpu" \
+  --job-name="muskie_ldi_scannetpp_${EPOCHS}ep_${GPU_TYPE}_${NUM_GPUS}gpu" \
   "${EXTRA_SBATCH[@]}" \
-  --output=muskie_ldi_training/%j.out \
-  --error=muskie_ldi_training/%j.err \
+  --output=muskie_ldi_scannetpptraining/%j.out \
+  --error=muskie_ldi_scannetpptraining/%j.err \
   --wrap="source /projects/rps/dff6142/fouheylab/dma9300/miniconda3/etc/profile.d/conda.sh && \
           conda activate mast3r && \
           cd /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/ && \
@@ -117,21 +121,21 @@ sbatch \
           trap 'rm -rf \$LMDB_DIR' EXIT && \
           echo \"start: \$(date)  restart count: \${SLURM_RESTART_COUNT:-0}\" && \
           mkdir -p \$LMDB_DIR && df -h \$LMDB_DIR && \
-          time cp ${SRC}/*.lmdb \$LMDB_DIR/ && \
+          time cp ${SRC}/${LMDB_GLOB} \$LMDB_DIR/ && \
           torchrun \
           --nproc_per_node=${NUM_GPUS} \
-          --master_port=8493 \
+          --master_port=8794 \
           finetune_ldi.py \
-          --train_dataset=\"ScanNet_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml') + Matterport3D_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + ARKitScenes_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml')\" \
-          --test_dataset=\"ScanNet_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml') + Matterport3D_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + ARKitScenes_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml')\" \
+          --train_dataset=\"ScannetPP_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
+          --test_dataset=\"ScannetPP_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
           --model=\"muskie_base_ldi(num_layers=4)\" \
           --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/muskie_base_default_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
-          --lr=2e-4 \
+          --lr=1e-4 \
           --epochs=${EPOCHS} \
-          --batch_size=${BATCH_SIZE} \
+          --batch_size=64\
           --accum_iter=1 \
           --save_freq=1 \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/muskie_base_model_downstream_ldi_scannet_matterport_arkitscenes_model_224_x_224_${EPOCHS}ep/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/muskie_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_focal_loss_only_bs64_model_224_x_224_${EPOCHS}ep/\""

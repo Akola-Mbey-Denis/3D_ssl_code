@@ -63,7 +63,7 @@ def _decode_z_buffer_depth(buf):
     if depth_int is None:
         raise RuntimeError("failed to decode depth bytes")
     depth_int = depth_int.astype(np.uint16)
-    mask = depth_int < (2 ** 16 - 1)
+    mask = (depth_int < 2 ** 16 - 1) & (depth_int > 0)
     depth_m = depth_int.astype(np.float32) / 512.0
     depth_m[~mask] = 0.0
     return depth_m, mask
@@ -364,11 +364,12 @@ class Replica_NVS(BaseDataset):
         for view in sequence_views:
             if self.load_depth:
                 depth_map = threshold_depth_map(view["depth"], min_percentile=-1, max_percentile=98)
-                mask =view["mask"].astype(np.int32) 
+                mask = (depth_map > 0.00).astype(np.int32) 
             else:
                 H, W = view["image"].shape[:2]
                 depth_map = np.zeros((H, W), np.float32)
                 mask = np.zeros((H, W), np.int32)
+
                 
             extri = self.rotate_inverse(np.array(view["extrinsics"]))                  # world2cam
             intri = np.array(view["intrinsics"])

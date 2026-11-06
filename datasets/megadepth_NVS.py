@@ -166,6 +166,13 @@ class MegaDepth_NVS(BaseDataset):
                 self.save_random_keys(self.seq_keys, save_path=val_path, num_samples=2000)
             with open(val_path, 'rb') as f:
                 self.seq_keys = pkl.load(f)
+        
+        if self.split == "test":
+            test_path = f"{self.root_dir}/megadepth_test_set__200_cvprr2027_samples.pkl"
+            if not os.path.exists(test_path):
+                self.save_random_keys(self.seq_keys, save_path=test_path, num_samples=200)
+            with open(test_path, 'rb') as f:
+                self.seq_keys = pkl.load(f)
 
         self.keys = self.seq_keys                            # name used by the old code
         print(f"MegaDepth_NVS [{self.split}] {len(self.seq_keys):,} sequences from {self.lmdb_path}")

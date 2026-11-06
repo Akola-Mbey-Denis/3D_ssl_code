@@ -17,6 +17,7 @@ from .arkitscenes_LDI import ARKitScenes_LDI
 from .matterport3D_LDI import Matterport3D_LDI
 from .scannet_LDI import ScanNet_LDI
 from .scannetpp_LDI import ScannetPP_LDI
+from .nrgbd_LDI import NRGBD_LDI
 
 #evaluation datasets
 from .dtu_NVS import DTU_NVS

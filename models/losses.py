@@ -443,588 +443,169 @@ class DepthLoss(nn.Module):
 
 # -----------------------------------------------------------------------------
 # Layered depth loss  (DepthLoss per layer + ordering + layer existence)
-# -----------------------------------------------------------------------------
-
-# class LayeredDepthLoss(nn.Module):
-#     """
-#     Loss for LayeredDPTHead (no confidence): N depths per pixel, sorted near -> far (layer 0 = visible surface),
-#     plus an existence logit per layer.
- 
-#     Per layer k, on the pixels where GT layer k exists:
-#         reg_k  = |d_k - gt_k|                                           (metres, quantile-filtered, mean)
-#         grad_k = multi-scale L1 on spatial gradients of (d_k - gt_k)    (if gradient_loss_fn="grad")
-#     Each layer is averaged on its own pixels, then layers are combined with layer_weights, so the
-#     rarer back layers are not drowned out by layer 0 (which has far more valid pixels).
- 
-#     order = mean relu(d_k - d_{k+1} + margin)       on pixels where GT layers k and k+1 both exist (metres)
-#     exist = BCE(exist_logit_k, [GT layer k exists])  on pixels where GT layer 0 exists (pixels with no
-#             valid geometry at all carry no label)
- 
-#     loss_layered_depth = weight * ( sum_k w_k (reg_k + grad_weight * grad_k) / sum_k w_k
-#                                     + order_weight * order + exist_weight * exist )
- 
-#     Predictions:
-#         layered_depth:       (B, S, N, H, W)  > 0
-#         layered_depth_exist: (B, S, N, H, W) logits, or None / missing (then no existence term)
-#     Ground truth:
-#         gt_layers:      (B, S, L, H, W), L >= N, sorted near -> far, same depth type as the head (z-depth)
-#         gt_layer_masks: (B, S, L, H, W) bool, True where layer k exists (layers stack front to back:
-#                         if layer k+1 exists, layer k exists)
-#     """
- 
-#     def __init__(
-#         self,
-#         weight=1.0,
-#         gradient_loss_fn=None,        # "grad" or None
-#         grad_weight=1.0,
-#         valid_range=0.98,             # quantile filter on the per-pixel errors (1.0 = keep all)
-#         gradient_scales=4,
-#         layer_weights=None,           # list of N floats; default all 1
-#         order_weight=1.0,
-#         order_margin=0.05,            # metres; 0 = only penalise d_{k+1} < d_k
-#         exist_weight=0.1,
-#         **kwargs,                     # gamma / alpha / depth_loss from older configs: ignored
-#     ):
-#         super().__init__()
-#         if gradient_loss_fn not in (None, "grad"):
-#             raise ValueError(f"Unknown depth gradient loss: {gradient_loss_fn}")
-#         self.weight = weight
-#         self.use_gradient_loss = gradient_loss_fn is not None
-#         self.grad_weight = grad_weight
-#         self.valid_range = valid_range
-#         self.gradient_scales = gradient_scales
-#         self.layer_weights = layer_weights
-#         self.order_weight = order_weight
-#         self.order_margin = order_margin
-#         self.exist_weight = exist_weight
- 
-#     def forward(self, predictions, gt_layers, gt_layer_masks):
-#         pred = predictions["layered_depth"].float()
-#         exist = predictions.get("layered_depth_exist")
-#         B, S, N, H, W = pred.shape
-#         if gt_layers.shape[2] < N:
-#             raise ValueError(f"head predicts {N} layers but GT has only {gt_layers.shape[2]}")
-#         gt = gt_layers[:, :, :N].float()
-#         mask = gt_layer_masks[:, :, :N].bool() & (gt > 0)
-#         lw = self.layer_weights or [1.0] * N
-#         zero = (0.0 * pred).mean()
- 
-#         out = {}
-#         total, wsum = zero, 0.0
-#         for k in range(N):
-#             m = mask[:, :, k]
-#             if not m.any():                       # no pixel has a k-th surface in this batch
-#                 out[f"loss_depth_L{k}"] = zero.detach()
-#                 continue
-#             d, g = pred[:, :, k], gt[:, :, k]
-#             reg = filter_by_quantile((d[m] - g[m]).abs(), self.valid_range).mean()
-#             if self.use_gradient_loss:
-#                 grad = depth_gradient_loss_multi_scale(
-#                     d.reshape(B * S, H, W, 1), g.reshape(B * S, H, W, 1), m.reshape(B * S, H, W),
-#                     scales=self.gradient_scales)
-#             else:
-#                 grad = zero
-#             layer_loss = reg + self.grad_weight * grad
-#             out[f"loss_depth_L{k}"] = layer_loss.detach()
-#             total = total + lw[k] * layer_loss
-#             wsum += lw[k]
-#         loss_layers = total / wsum if wsum > 0 else zero
- 
-#         # ordering (metres): consecutive predicted layers must stay sorted where both GT layers exist
-#         both = mask[:, :, :-1] & mask[:, :, 1:]
-#         if N > 1 and both.any():
-#             loss_order = F.relu(pred[:, :, :-1] - pred[:, :, 1:] + self.order_margin)[both].mean()
-#         else:
-#             loss_order = zero
- 
-#         # existence of each layer, on pixels with any valid geometry
-#         valid_px = mask[:, :, :1].expand_as(mask)
-#         if exist is not None and valid_px.any():
-#             loss_exist = F.binary_cross_entropy_with_logits(
-#                 exist[valid_px].float(), mask[valid_px].float())
-#         else:
-#             loss_exist = zero
- 
-#         loss = (loss_layers + self.order_weight * loss_order + self.exist_weight * loss_exist) * self.weight
-#         out.update({
-#             "objective": loss,
-#             "loss_layers": loss_layers.detach(),
-#             "loss_order": loss_order.detach(),
-#             "loss_exist": loss_exist.detach(),
-#         })
-#         return out
-
-
-
-# class LayeredDepthLoss(nn.Module):
-#     """
-#     Loss for LayeredDPTHead (no confidence): N depths per pixel, sorted near -> far (layer 0 = visible surface),
-#     plus an existence logit per layer.
-
-#     Per layer k, on the pixels where GT layer k exists:
-#         l1_k    = mean |d_k - gt_k|                                   (metres)
-#         grad_k  = multi-scale L1 on spatial gradients of (d_k - gt_k)  (if gradient_loss_fn="grad")
-#         layer_k = l1_k + grad_weight * grad_k
-#     Each layer is averaged on its own pixels, then layers are combined with layer_weights, so the
-#     rarer back layers are not drowned out by layer 0.
-
-#     order = mean relu(d_k - d_{k+1} + margin)       on pixels where GT layers k and k+1 both exist (metres)
-#     exist = BCE(exist_logit_k, [GT layer k exists])  on pixels where GT layer 0 exists
-
-#     loss = weight * ( sum_k w_k layer_k / sum_k w_k + order_weight * order + exist_weight * exist )
-
-#     Predictions:
-#         layered_depth:       (B, S, N, H, W)  > 0
-#         layered_depth_exist: (B, S, N, H, W) logits, or None / missing (then no existence term)
-#     Ground truth:
-#         gt_layers:      (B, S, L, H, W), L >= N, sorted near -> far, same depth type as the head (z-depth)
-#         gt_layer_masks: (B, S, L, H, W) bool, True where layer k exists
-#     """
-
-#     def __init__(
-#         self,
-#         weight=1.0,
-#         gradient_loss_fn="grad",        # "grad" or None
-#         grad_weight=0.10,
-#         gradient_scales=4,
-#         layer_weights=None,           # list of N floats; default all 1
-#         order_weight=0.05,
-#         order_margin=0.0,             # metres; 0 = only penalise d_{k+1} < d_k
-#         exist_weight=0.0,             # 0 = existence head gets no gradient (BCE still logged)
-#         **kwargs,                     # gamma / alpha / depth_loss / valid_range from older configs: ignored
-#     ):
-#         super().__init__()
-#         if gradient_loss_fn not in (None, "grad"):
-#             raise ValueError(f"Unknown depth gradient loss: {gradient_loss_fn}")
-#         self.weight = weight
-#         self.use_gradient_loss = gradient_loss_fn is not None
-#         self.grad_weight = grad_weight
-#         self.gradient_scales = gradient_scales
-#         self.layer_weights = layer_weights
-#         self.order_weight = order_weight
-#         self.order_margin = order_margin
-#         self.exist_weight = exist_weight
-
-#     def forward(self, predictions, gt_layers, gt_layer_masks):
-#         pred = predictions["layered_depth"].float()
-#         exist = predictions.get("layered_depth_exist")
-#         B, S, N, H, W = pred.shape
-#         if gt_layers.shape[2] < N:
-#             raise ValueError(f"head predicts {N} layers but GT has only {gt_layers.shape[2]}")
-#         gt = gt_layers[:, :, :N].float()
-#         mask = gt_layer_masks[:, :, :N].bool() & (gt > 0)
-#         lw = self.layer_weights or [1.0] * N
-#         zero = (0.0 * pred).mean()
-
-#         out = {}
-#         total, wsum = zero, 0.0
-#         for k in range(N):
-#             m = mask[:, :, k]
-#             d, g = pred[:, :, k], gt[:, :, k]
-
-#             # ---- per-layer logging stats (no grad) ----
-#             with torch.no_grad():
-#                 cnt = m.reshape(B * S, -1).sum(dim=1).float()      # valid pixels per image
-#                 has = cnt > 0
-#                 out[f"valid_pct_L{k}"] = m.float().mean() * 100.0  # % of all pixels with a valid layer-k GT
-#                 out[f"n_imgs_valid_L{k}"] = has.sum().float()      # images with >= 1 valid pixel
-#                 out[f"avg_valid_px_L{k}"] = cnt.mean()             # avg valid pixels per image (all images)
-#                 if m.any():
-#                     err = (d[m] - g[m]).abs()
-#                     out[f"mae_L{k}"] = err.mean()                  # metres
-#                     out[f"absrel_L{k}"] = (err / g[m]).mean()
-#                 else:
-#                     out[f"mae_L{k}"] = zero.detach()
-#                     out[f"absrel_L{k}"] = zero.detach()
-
-#             if not m.any():                       # no pixel has a k-th surface in this batch
-#                 out[f"loss_depth_L{k}"] = zero.detach()
-#                 continue
-#             l1 = (d[m] - g[m]).abs().mean()
-#             if self.use_gradient_loss:
-#                 grad = depth_gradient_loss_multi_scale(
-#                     d.reshape(B * S, H, W, 1), g.reshape(B * S, H, W, 1),
-#                     m.reshape(B * S, H, W), scales=self.gradient_scales)
-#             else:
-#                 grad = zero
-#             layer_loss = l1 + self.grad_weight * grad
-#             out[f"loss_depth_L{k}"] = layer_loss.detach()
-#             total = total + lw[k] * layer_loss
-#             wsum += lw[k]
-#         loss_layers = total / wsum if wsum > 0 else zero
-
-#         # ordering (metres): consecutive predicted layers must stay sorted where both GT layers exist
-#         both = mask[:, :, :-1] & mask[:, :, 1:]
-#         if N > 1 and both.any():
-#             loss_order = F.relu(pred[:, :, :-1] - pred[:, :, 1:] + self.order_margin)[both].mean()
-#         else:
-#             loss_order = zero
-
-#         # existence of each layer, on pixels with any valid geometry
-#         valid_px = mask[:, :, :1].expand_as(mask)
-#         if exist is not None and valid_px.any():
-#             loss_exist = F.binary_cross_entropy_with_logits(
-#                 exist[valid_px].float(), mask[valid_px].float())
-#         else:
-#             loss_exist = zero
-
-#         loss = (loss_layers + self.order_weight * loss_order + self.exist_weight * loss_exist) * self.weight
-#         out.update({
-#             "objective": loss,
-#             "loss_layers": loss_layers.detach(),
-#             "loss_order": loss_order.detach(),
-#             "loss_exist": loss_exist.detach(),
-#         })
-#         return out
-# # -----------------------------------------------------------------------------
-# Spatial gradient loss used by PointmapLoss (unchanged, supports confidence)
-# # -----------------------------------------------------------------------------
-
-# class LayeredDepthLoss(nn.Module):
-#     """
-#     Loss for LayeredDPTHead (no confidence): N depths per pixel, sorted near -> far (layer 0 = visible surface),
-#     plus an existence logit per layer.
-
-#     Per layer k, on the pixels where GT layer k exists:
-#         l1_k    = mean |d_k - gt_k|            (metres)   or   mean |log d_k - log gt_k|   (log_space=True)
-#         grad_k  = multi-scale L1 on spatial gradients of (d_k - gt_k)  (if gradient_loss_fn="grad")
-#         layer_k = l1_k + grad_weight * grad_k
-#     Layers are combined with layer_weights (default [3, 1, 1, 1] = loss_L0 + mean(L1..L3), normalised),
-#     so layer 0 trains like the plain depth probe and the back layers still get half the weight.
-
-#     order = mean relu(d_k - d_{k+1} + margin)       on pixels where GT layers k and k+1 both exist (metres)
-#     exist = BCE(exist_logit_k, [GT layer k exists])  on pixels where GT layer 0 exists,
-#             pos_weight per layer (= (1 - p_k) / p_k from the layer frequencies) if exist_pos_weight is given
-
-#     loss = weight * ( sum_k w_k layer_k / sum_k w_k + order_weight * order + exist_weight * exist )
-
-#     Extra logging (no grad):
-#         absrel_aligned_L{k}: AbsRel after scaling every image by the median gt/pred ratio of its LAYER 0
-#                              (same scale for all layers) -> separates "wrong metric scale" from "wrong geometry"
-#         absrel_gapbase_L{k}: AbsRel of the trivial predictor gt_0 + median(gt_k - gt_0) over the batch (k >= 1)
-#                              -> the floor a hidden layer has to beat to show the features know what's behind
-#     """
-
-#     def __init__(
-#         self,
-#         weight=1.0,
-#         gradient_loss_fn="grad",        # "grad" or None
-#         grad_weight=0.10,
-#         gradient_scales=4,
-#         layer_weights=None,           # list of N floats; default [3, 1, ..., 1]
-#         log_space=True,               # L1 on log-depth (scale-balanced, matches the exp activation)
-#         order_weight=0.05,
-#         order_margin=0.0,             # metres; 0 = only penalise d_{k+1} < d_k
-#         exist_weight=0.0,             # 0 = existence head gets no gradient (BCE still logged)
-#         exist_pos_weight=None,        # list of N floats, e.g. [0.07, 3.2, 9.2, 39]
-#         **kwargs,                     # gamma / alpha / depth_loss / valid_range from older configs: ignored
-#     ):
-#         super().__init__()
-#         if gradient_loss_fn not in (None, "grad"):
-#             raise ValueError(f"Unknown depth gradient loss: {gradient_loss_fn}")
-#         self.weight = weight
-#         self.use_gradient_loss = gradient_loss_fn is not None
-#         self.grad_weight = grad_weight
-#         self.gradient_scales = gradient_scales
-#         self.layer_weights = layer_weights
-#         self.log_space = log_space
-#         self.order_weight = order_weight
-#         self.order_margin = order_margin
-#         self.exist_weight = exist_weight
-#         self.exist_pos_weight = exist_pos_weight
-
-#     @staticmethod
-#     def _median_ratio(num, den, m):
-#         """Per-image median of num/den over mask m; inputs (B*S, P). Images with no valid pixel -> 1."""
-#         r = torch.where(m, num / den.clamp_min(1e-6), torch.full_like(num, float("nan")))
-#         med = torch.nanmedian(r, dim=1).values
-#         return torch.where(torch.isfinite(med), med, torch.ones_like(med))
-
-#     def forward(self, predictions, gt_layers, gt_layer_masks):
-#         pred = predictions["layered_depth"].float()
-#         exist = predictions.get("layered_depth_exist")
-#         B, S, N, H, W = pred.shape
-#         if gt_layers.shape[2] < N:
-#             raise ValueError(f"head predicts {N} layers but GT has only {gt_layers.shape[2]}")
-#         gt = gt_layers[:, :, :N].float()
-#         mask = gt_layer_masks[:, :, :N].bool() & (gt > 0)
-#         lw = self.layer_weights or ([3.0] + [1.0] * (N - 1))
-#         zero = (0.0 * pred).mean()
-
-#         # per-image scale from layer 0 (logging only)
-#         with torch.no_grad():
-#             d0f, g0f, m0f = (t[:, :, 0].reshape(B * S, -1) for t in (pred, gt, mask))
-#             scale = self._median_ratio(g0f, d0f, m0f).view(B, S, 1, 1)
-
-#         out = {}
-#         total, wsum = zero, 0.0
-#         for k in range(N):
-#             m = mask[:, :, k]
-#             d, g = pred[:, :, k], gt[:, :, k]
-
-#             # ---- per-layer logging stats (no grad) ----
-#             with torch.no_grad():
-#                 cnt = m.reshape(B * S, -1).sum(dim=1).float()
-#                 has = cnt > 0
-#                 out[f"valid_pct_L{k}"] = m.float().mean() * 100.0
-#                 out[f"n_imgs_valid_L{k}"] = has.sum().float()
-#                 out[f"avg_valid_px_L{k}"] = cnt.mean()
-#                 if m.any():
-#                     err = (d[m] - g[m]).abs()
-#                     out[f"mae_L{k}"] = err.mean()
-#                     out[f"absrel_L{k}"] = (err / g[m]).mean()
-#                     out[f"absrel_aligned_L{k}"] = ((d * scale)[m] - g[m]).abs().div(g[m]).mean()
-#                     if k > 0:
-#                         both = m & mask[:, :, 0]
-#                         if both.any():
-#                             gap = (g[both] - gt[:, :, 0][both]).median()
-#                             base = gt[:, :, 0] + gap
-#                             out[f"absrel_gapbase_L{k}"] = (base[both] - g[both]).abs().div(g[both]).mean()
-#                 else:
-#                     for name in ("mae", "absrel", "absrel_aligned"):
-#                         out[f"{name}_L{k}"] = zero.detach()
-
-#             if not m.any():
-#                 out[f"loss_depth_L{k}"] = zero.detach()
-#                 continue
-#             if self.log_space:
-#                 l1 = (d[m].clamp_min(1e-3).log() - g[m].log()).abs().mean()
-#             else:
-#                 l1 = (d[m] - g[m]).abs().mean()
-#             if self.use_gradient_loss:
-#                 grad = depth_gradient_loss_multi_scale(
-#                     d.reshape(B * S, H, W, 1), g.reshape(B * S, H, W, 1),
-#                     m.reshape(B * S, H, W), scales=self.gradient_scales)
-#             else:
-#                 grad = zero
-#             layer_loss = l1 + self.grad_weight * grad
-#             out[f"loss_depth_L{k}"] = layer_loss.detach()
-#             total = total + lw[k] * layer_loss
-#             wsum += lw[k]
-#         loss_layers = total / wsum if wsum > 0 else zero
-
-#         both = mask[:, :, :-1] & mask[:, :, 1:]
-#         if N > 1 and both.any():
-#             loss_order = F.relu(pred[:, :, :-1] - pred[:, :, 1:] + self.order_margin)[both].mean()
-#         else:
-#             loss_order = zero
-
-#         valid_px = mask[:, :, :1].expand_as(mask)
-#         if exist is not None and valid_px.any():
-#             pw = None
-#             if self.exist_pos_weight is not None:
-#                 pw = pred.new_tensor(self.exist_pos_weight[:N]).view(1, 1, N, 1, 1).expand_as(mask)[valid_px]
-#             loss_exist = F.binary_cross_entropy_with_logits(
-#                 exist[valid_px].float(), mask[valid_px].float(), pos_weight=pw)
-#         else:
-#             loss_exist = zero
-
-#         loss = (loss_layers + self.order_weight * loss_order + self.exist_weight * loss_exist) * self.weight
-#         out.update({
-#             "objective": loss,
-#             "loss_layers": loss_layers.detach(),
-#             "loss_order": loss_order.detach(),
-#             "loss_exist": loss_exist.detach(),
-#         })
-#         return out
-
-
-# -----------------------------------------------------------------------------
-
 class LayeredDepthLoss(nn.Module):
     """
-    Loss for LayeredDPTHead (no confidence): N depths per pixel, sorted near -> far (layer 0 = visible surface),
-    plus an existence logit per layer. Head unchanged: every fix is in the loss (parameter-free, probe-fair).
+    Simple loss for LayeredDPTHead: N depths per pixel, sorted near -> far (layer 0 = visible surface), plus ray
+    stopping logits (N + 1 classes per pixel, as LaRI). Depth, gradient (layer 0) and stopping terms:
 
-    Valid GT: gt_layer_masks & min_depth < gt < max_depth (default 0.1 - 16 m, as the LMDB agreement check).
+        depth = sum_K 1/K  mean over the valid pixels of layer K of |d_K - gt_K|   (depth_norm="l1", metres)
+                                                                or (d_K - gt_K)^2  (depth_norm="l2")
+                K = 1..N (1-based layer index: layer 1 = visible surface / 1, layer 2 / 2, ...);
+                a layer with no valid pixel in the batch adds 0
+                depth_norm="silog": the loss that gave good LDIs with the VGGT backbone (SiLogLoss), per layer k
+                    silog_k = sqrt( mean r^2 - lambda * (mean r)^2 ),  r = log gt_k - log d_k over the layer's valid
+                              pixels of the WHOLE batch (one scale per layer and batch), lambda = 0.85
+                    depth   = mean_k silog_k + 0.2 * mean_k |d_k - gt_k| + 0.05 * mean relu(d_k - d_{k+1})
+                              (ordering on pixels where layers k and k+1 are both valid)
+        grad  = depth_gradient_loss_multi_scale on LAYER 0 only (multi-scale L1 on the spatial gradients of
+                d_0 - gt_0, gradient_scales scales; gradient_loss_fn=None turns it off)
+        stop  = stop_loss="bce" (default): BCEWithLogits(stop_logits, one-hot(C))  over the N + 1 classes
+                stop_loss="ce":            CrossEntropy(stop_logits, C)             (LaRI's RegrStopPoint)
+                on pixels where GT layer 0 is valid
+        loss  = weight * (depth + grad_weight * grad + exist_weight * stop)
 
-    Per layer k, on the pixels where GT layer k exists, log residual  r_k = log d_k - log gt_k :
-        scale_invariant=True: r_k <- r_k - s,  s = per-image median of r_0 over layer-0 pixels (detached),
-                              the SAME s for every layer -> hidden layers are judged relative to the visible
-                              surface, and the probe is not asked for metric scale (which SSL features need not
-                              know). anchor_weight * mean|r_0| (unshifted) keeps the absolute scale from drifting.
-        l1_k    = mean |r_k|                     (log_space=True)   or   mean |d_k - gt_k|  (metres)
-        grad_k  = multi-scale gradient loss, ONLY on the layers in grad_layers (default layer 0: on the sparse
-                  back layers there are almost no valid neighbours, so it is mostly noise)
-        layer_k = l1_k + grad_weight * grad_k
-    Layers are combined with layer_weights (default [3, 1, ..., 1] = loss_L0 + mean(L1..L(N-1)), normalised).
+    GT stopping index exactly as LaRI (RegrStopPoint.mask_to_stop_index): C = mask.sum over the layers, in {0..N}
+    (0 = no intersection). Inference (as LaRI): C = argmax_c stop_logits, layer k exists iff k < C.
+    Valid GT for layer k: gt_layer_masks[k] & min_depth < gt_k < max_depth.
 
-    gap (k >= 1)  = mean | (d_k - d_{k-1}) - (gt_k - gt_{k-1}) | / gt_k   on pixels where GT layers k-1, k exist
-                    (pred scaled by exp(-s) in scale-invariant mode): supervises "how far behind" directly, so a
-                    hidden layer is not penalised twice for an error it inherits from the layer in front.
-    order         = mean relu(d_k + order_margin - d_{k+1})   (order_margin default 16/256 m = the LDI's minimum
-                    layer separation)
-    exist         = BCE(exist_logit_k, [GT layer k exists]) on pixels where GT layer 0 exists (pos_weight optional)
+    Logged (no gradient): objective, loss_layers, loss_grad, loss_exist, absrel_L{k}, stop_acc, stop_acc_base,
+        mask_iou
+        stop_acc      accuracy of argmax_c on the supervised pixels
+        stop_acc_base accuracy of always predicting index 1 ("only the visible surface") on the same pixels
+        mask_iou      IoU of the hidden-layer masks (layers 1 .. N-1) from the predicted vs GT stopping index
 
-    loss = weight * ( sum_k w_k layer_k / sum_k w_k + anchor_weight * anchor + gap_weight * gap
-                      + order_weight * order + exist_weight * exist )
-
-    Extra logging (no grad):
-        absrel_aligned_L{k}      AbsRel after scaling each image by the median gt/pred ratio of its layer 0
-        absrel_gapbase_L{k}      AbsRel of gt_0 + median(gt_k - gt_0)                (oracle: GT layer 0)
-        absrel_gapbase_pred_L{k} AbsRel of aligned pred_0 + median(gt_k - gt_0)
-                                 -> compare absrel_aligned_L{k} to this: the floor a hidden layer must beat
-        gap_q25/q50/q75_L{k}     quartiles of gt_k - gt_0 (m); ~0.1-0.3 m = mostly back faces of objects
+    Predictions:
+        layered_depth:       (B, S, N, H, W)      > 0
+        layered_depth_stop:  (B, S, N + 1, H, W)  ray stopping logits (None / missing: no stopping term)
+    Ground truth:
+        gt_layers:      (B, S, L, H, W), L >= N, sorted near -> far (z-depth, metres)
+        gt_layer_masks: (B, S, L, H, W) bool, True where layer k exists
     """
 
     def __init__(
         self,
         weight=1.0,
-        gradient_loss_fn="grad",        # "grad" or None
+        depth_norm="l1",              # "l1", "l2" or "silog" (the VGGT LDI loss)
+        silog_lambda=0.85,            # silog only
+        silog_l1_weight=0.2,          # silog only: + L1 "for sharpness"
+        silog_order_weight=0.05,      # silog only: + ordering
+        gradient_loss_fn="grad",      # "grad" or None: gradient loss on layer 0
         grad_weight=0.10,
         gradient_scales=4,
-        grad_layers=(0,),             # layers that get the gradient loss
-        layer_weights=None,           # list of N floats; default [3, 1, ..., 1]
-        log_space=True,               # L1 on log-depth (scale-balanced, matches the exp activation)
-        scale_invariant=True,         # per-image log shift from layer 0, shared by all layers (needs log_space)
-        anchor_weight=0.1,            # unshifted log L1 on layer 0, keeps the absolute scale (scale_invariant only)
-        gap_weight=1.0,               # loss on the predicted vs GT gap between consecutive layers
+        exist_weight=0.40,             # weight of the stopping loss (0 = depth only)
+        stop_loss="bce",              # "bce": BCE on one-hot(C) over N + 1 classes; "ce": cross-entropy (LaRI)
         min_depth=0.1,                # metres
         max_depth=16.0,               # metres
-        order_weight=0.05,
-        order_margin=16 / 256,        # metres; the LDI's minimum layer separation
-        exist_weight=0.0,             # 0 = existence head gets no gradient (BCE still logged)
-        exist_pos_weight=None,        # list of N floats, e.g. [0.07, 3.2, 9.2, 39]
-        **kwargs,                     # gamma / alpha / depth_loss / valid_range from older configs: ignored
+        **kwargs,                     # options of older configs (order_weight, stop_weight, ...): ignored
     ):
         super().__init__()
+        if stop_loss not in ("bce", "ce"):
+            raise ValueError(f"stop_loss must be 'bce' or 'ce', got {stop_loss!r}")
+        self.stop_loss = stop_loss
+        if depth_norm not in ("l1", "l2", "silog"):
+            raise ValueError(f"depth_norm must be 'l1', 'l2' or 'silog', got {depth_norm!r}")
+        self.silog_lambda = silog_lambda
+        self.silog_l1_weight = silog_l1_weight
+        self.silog_order_weight = silog_order_weight
+        self.weight = weight
+        self.depth_norm = depth_norm
+        self.exist_weight = exist_weight
         if gradient_loss_fn not in (None, "grad"):
             raise ValueError(f"Unknown depth gradient loss: {gradient_loss_fn}")
-        if scale_invariant and not log_space:
-            raise ValueError("scale_invariant needs log_space=True")
-        self.weight = weight
         self.use_gradient_loss = gradient_loss_fn is not None
         self.grad_weight = grad_weight
         self.gradient_scales = gradient_scales
-        self.grad_layers = set(grad_layers)
-        self.layer_weights = layer_weights
-        self.log_space = log_space
-        self.scale_invariant = scale_invariant
-        self.anchor_weight = anchor_weight
-        self.gap_weight = gap_weight
         self.min_depth = min_depth
         self.max_depth = max_depth
-        self.order_weight = order_weight
-        self.order_margin = order_margin
-        self.exist_weight = exist_weight
-        self.exist_pos_weight = exist_pos_weight
 
     @staticmethod
-    def _masked_median(x, m):
-        """Per-image median of x over mask m; inputs (B*S, P). Images with no valid pixel -> nan."""
-        return torch.nanmedian(torch.where(m, x, torch.full_like(x, float("nan"))), dim=1).values
+    def stop_index_from_masks(mask):
+        """(..., N, H, W) bool layer masks -> (..., H, W) long stopping index, as LaRI: mask.sum over the layers
+        (0 = no intersection). Same as counting from the front when the valid layers have no gap."""
+        return mask.long().sum(dim=-3)
+
+    @staticmethod
+    def masks_from_stop_index(C, N):
+        """(..., H, W) stopping index -> (..., N, H, W) bool: layer k exists iff k < C."""
+        return torch.arange(N, device=C.device).view(N, 1, 1) < C.unsqueeze(-3)
 
     def forward(self, predictions, gt_layers, gt_layer_masks):
-        pred = predictions["layered_depth"].float()
-        exist = predictions.get("layered_depth_exist")
+        pred = predictions["layered_depth"].float()                  # (B, S, N, H, W)
+        stop = predictions.get("layered_depth_stop", predictions.get("layered_depth_exist"))   # N + 1 logits
         B, S, N, H, W = pred.shape
         if gt_layers.shape[2] < N:
             raise ValueError(f"head predicts {N} layers but GT has only {gt_layers.shape[2]}")
         gt = gt_layers[:, :, :N].float()
         mask = gt_layer_masks[:, :, :N].bool() & (gt > self.min_depth) & (gt < self.max_depth)
-        lw = self.layer_weights or ([3.0] + [1.0] * (N - 1))
         zero = (0.0 * pred).mean()
-
-        log_pred = pred.clamp_min(1e-3).log()
-        log_gt = gt.clamp_min(1e-3).log()
-        m0f = mask[:, :, 0].reshape(B * S, -1)
-
-        with torch.no_grad():
-            # per-image log shift s from layer 0: pred * exp(-s) has the GT's median scale
-            s = self._masked_median((log_pred - log_gt)[:, :, 0].reshape(B * S, -1), m0f)
-            s = torch.where(torch.isfinite(s), s, torch.zeros_like(s)).view(B, S, 1, 1)
-            scale = torch.exp(-s)                                     # for logging: aligned pred = pred * scale
-
-        shift = s if self.scale_invariant else torch.zeros_like(s)    # (B, S, 1, 1), detached
         out = {}
-        total, wsum = zero, 0.0
+
+        # ---------------- depth: L1 / L2 of layer K (1-based) divided by K, summed over the layers ----------------
+        layer_losses, silog_terms, l1_terms = [], [], []
         for k in range(N):
             m = mask[:, :, k]
-            d, g = pred[:, :, k], gt[:, :, k]
-
-            # ---- per-layer logging stats (no grad) ----
-            with torch.no_grad():
-                cnt = m.reshape(B * S, -1).sum(dim=1).float()
-                has = cnt > 0
-                out[f"valid_pct_L{k}"] = m.float().mean() * 100.0
-                out[f"n_imgs_valid_L{k}"] = has.sum().float()
-                out[f"avg_valid_px_L{k}"] = cnt.mean()
-                if m.any():
-                    err = (d[m] - g[m]).abs()
-                    out[f"mae_L{k}"] = err.mean()
-                    out[f"absrel_L{k}"] = (err / g[m]).mean()
-                    out[f"absrel_aligned_L{k}"] = ((d * scale)[m] - g[m]).abs().div(g[m]).mean()
-                    if k > 0:
-                        both = m & mask[:, :, 0]
-                        if both.any():
-                            gaps = g[both] - gt[:, :, 0][both]
-                            gap = gaps.median()
-                            base = gt[:, :, 0] + gap
-                            out[f"absrel_gapbase_L{k}"] = (base[both] - g[both]).abs().div(g[both]).mean()
-                            base_p = pred[:, :, 0] * scale + gap
-                            out[f"absrel_gapbase_pred_L{k}"] = (base_p[both] - g[both]).abs().div(g[both]).mean()
-                            q = torch.quantile(gaps[:100000], gaps.new_tensor([0.25, 0.5, 0.75]))
-                            out[f"gap_q25_L{k}"], out[f"gap_q50_L{k}"], out[f"gap_q75_L{k}"] = q[0], q[1], q[2]
-                else:
-                    for name in ("mae", "absrel", "absrel_aligned"):
-                        out[f"{name}_L{k}"] = zero.detach()
-
             if not m.any():
-                out[f"loss_depth_L{k}"] = zero.detach()
+                out[f"absrel_L{k}"] = zero.detach()
                 continue
-            if self.log_space:
-                r = log_pred[:, :, k] - log_gt[:, :, k] - shift              # shift (B, S, 1, 1)
-                l1 = r[m].abs().mean()
+            d, g = pred[:, :, k][m], gt[:, :, k][m]
+            diff = d - g
+            out[f"absrel_L{k}"] = (diff.abs() / g).mean().detach()
+            if self.depth_norm == "silog":                            # as SiLogLoss: whole batch, one scale per layer
+                r = torch.log(g + 1e-6) - torch.log(d + 1e-6)
+                silog_terms.append(torch.sqrt(r.pow(2).mean() - self.silog_lambda * r.mean().pow(2) + 1e-6))
+                l1_terms.append(diff.abs().mean())
             else:
-                l1 = (d[m] - g[m]).abs().mean()
-            if self.use_gradient_loss and k in self.grad_layers:
-                grad = depth_gradient_loss_multi_scale(
-                    d.reshape(B * S, H, W, 1), g.reshape(B * S, H, W, 1),
-                    m.reshape(B * S, H, W), scales=self.gradient_scales)
-            else:
-                grad = zero
-            layer_loss = l1 + self.grad_weight * grad
-            out[f"loss_depth_L{k}"] = layer_loss.detach()
-            total = total + lw[k] * layer_loss
-            wsum += lw[k]
-        loss_layers = total / wsum if wsum > 0 else zero
-
-        # anchor: unshifted log L1 on layer 0 (only matters in scale-invariant mode)
-        m0 = mask[:, :, 0]
-        if self.scale_invariant and m0.any():
-            loss_anchor = (log_pred[:, :, 0] - log_gt[:, :, 0])[m0].abs().mean()
+                l_k = diff.abs().mean() if self.depth_norm == "l1" else diff.pow(2).mean()
+                layer_losses.append(l_k / (k + 1))                    # layer k (1-based K = k + 1): / K
+        if self.depth_norm == "silog":
+            both = mask[:, :, :-1] & mask[:, :, 1:]
+            order = F.relu(pred[:, :, :-1] - pred[:, :, 1:])[both].mean() if (N > 1 and both.any()) else zero
+            # SiLogLoss divides each layer's term by K (all layers), also when a layer has no pixels
+            loss_layers = (torch.stack(silog_terms).sum() / N + self.silog_l1_weight * torch.stack(l1_terms).sum() / N
+                           + self.silog_order_weight * order) if silog_terms else zero
+            out["loss_order"] = order.detach()
         else:
-            loss_anchor = zero
+            loss_layers = torch.stack(layer_losses).sum() if layer_losses else zero   # sum_K loss_K / K
 
-        # gap between consecutive layers, relative to the GT depth of the back layer
-        both = mask[:, :, :-1] & mask[:, :, 1:]
-        if N > 1 and both.any():
-            p_al = pred * torch.exp(-shift).unsqueeze(2)                  # (B, S, N, H, W)
-            gap_p = p_al[:, :, 1:] - p_al[:, :, :-1]
-            gap_g = gt[:, :, 1:] - gt[:, :, :-1]
-            loss_gap = ((gap_p - gap_g).abs() / gt[:, :, 1:].clamp_min(self.min_depth))[both].mean()
-            loss_order = F.relu(pred[:, :, :-1] + self.order_margin - pred[:, :, 1:])[both].mean()
-        else:
-            loss_gap = loss_order = zero
+        # ---------------- gradient loss: layer 0 only ----------------
+        loss_grad = zero
+        if self.use_gradient_loss and mask[:, :, 0].any():
+            loss_grad = depth_gradient_loss_multi_scale(
+                pred[:, :, 0].reshape(B * S, H, W, 1), gt[:, :, 0].reshape(B * S, H, W, 1),
+                mask[:, :, 0].reshape(B * S, H, W), scales=self.gradient_scales)
 
-        valid_px = mask[:, :, :1].expand_as(mask)
-        if exist is not None and valid_px.any():
-            pw = None
-            if self.exist_pos_weight is not None:
-                pw = pred.new_tensor(self.exist_pos_weight[:N]).view(1, 1, N, 1, 1).expand_as(mask)[valid_px]
-            loss_exist = F.binary_cross_entropy_with_logits(
-                exist[valid_px].float(), mask[valid_px].float(), pos_weight=pw)
-        else:
-            loss_exist = zero
+        # ---------------- ray stopping index (LaRI) ----------------
+        loss_exist = zero
+        if stop is not None:
+            if stop.shape[2] != N + 1:
+                raise ValueError(f"stopping logits have {stop.shape[2]} channels, expected N + 1 = {N + 1}")
+            C = self.stop_index_from_masks(mask)                      # (B, S, H, W) in {0..N}, LaRI: mask.sum
+            valid = mask[:, :, 0]                                     # pixels with a visible surface
+            logits = stop.float().permute(0, 1, 3, 4, 2)[valid]       # (n, N + 1)
+            target = C[valid]                                         # (n,)
+            if target.numel() > 0:
+                if self.stop_loss == "bce":
+                    loss_exist = F.binary_cross_entropy_with_logits(logits, F.one_hot(target, N + 1).float())
+                else:
+                    loss_exist = F.cross_entropy(logits, target)
+            with torch.no_grad():
+                C_pred = stop.argmax(dim=2)                           # (B, S, H, W)
+                if valid.any():
+                    out["stop_acc"] = (C_pred == C)[valid].float().mean()
+                    out["stop_acc_base"] = (C == 1)[valid].float().mean()
+                else:
+                    out["stop_acc"] = out["stop_acc_base"] = zero.detach()
+                pm = self.masks_from_stop_index(C_pred, N) & valid[:, :, None]
+                gm = self.masks_from_stop_index(C, N) & valid[:, :, None]
+                a, b = pm[:, :, 1:], gm[:, :, 1:]
+                out["mask_iou"] = (a & b).sum().float() / (a | b).sum().float() if (a | b).any() \
+                    else pred.new_tensor(1.0)
 
-        loss = (loss_layers + self.anchor_weight * loss_anchor + self.gap_weight * loss_gap
-                + self.order_weight * loss_order + self.exist_weight * loss_exist) * self.weight
+        loss = (loss_layers + self.grad_weight * loss_grad + self.exist_weight * loss_exist) * self.weight
         out.update({
             "objective": loss,
             "loss_layers": loss_layers.detach(),
-            "loss_anchor": loss_anchor.detach(),
-            "loss_gap": loss_gap.detach(),
-            "loss_order": loss_order.detach(),
+            "loss_grad": loss_grad.detach(),
             "loss_exist": loss_exist.detach(),
         })
         return out

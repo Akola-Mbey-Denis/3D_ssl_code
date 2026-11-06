@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GPU_TYPE="h200"
+GPU_TYPE="b200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
 

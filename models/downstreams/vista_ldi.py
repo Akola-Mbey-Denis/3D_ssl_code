@@ -73,7 +73,7 @@ class Vista_LDI(nn.Module):
         """
         images: (B, S, 3, H, W), H and W multiples of patch_size.
         Returns dict with
-            layered_depth, layered_depth_conf, layered_depth_exist (logits or None): (B, S, N, H, W)
+            layered_depth, layered_depth_conf, layered_depth_stop (logits or None): (B, S, N, H, W)
             depth, depth_conf: layer 0, (B, S, H, W)  -- the ordinary depth, for eval_ssl.py
         """
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -84,13 +84,13 @@ class Vista_LDI(nn.Module):
 
         predictions = {}
         with torch.autocast(device_type="cuda", enabled=False):
-            layered_depth, layered_exist = self.dpt_head(
+            layered_depth, layered_depth_stop = self.dpt_head(
                 images=images,
                 aggregated_tokens_list=aggregated_tokens_list,
                 patch_start_idx=patch_start_idx,                     # as reported by the encoder
             )
             predictions["layered_depth"] = layered_depth                # (B, S, N, H, W)
-            predictions["layered_depth_exist"] = layered_exist
+            predictions["layered_depth_stop"] = layered_depth_stop
             predictions["depth"] = layered_depth[:, :, 0]               # layer 0 = visible surface
 
         return predictions

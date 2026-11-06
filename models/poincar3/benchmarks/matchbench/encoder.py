@@ -6,14 +6,14 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from poincar3.benchmarks.dense_features import (
+from models.poincar3.benchmarks.dense_features import (
     extract_dense_features_at_block,
     extract_multilayer_patch_features_batched,
     extract_patch_features_batched,
     get_feature_probe,
     resolve_block_fraction,
 )
-from poincar3.model import Poincar3
+from models.poincar3.model import Poincar3
 
 # `layer_idx`'s literal entries (the `(11, 17)` default comes from RoMa v2's
 # own `Descriptor.Cfg.layer_idx`) are absolute indices into a 24-block network,

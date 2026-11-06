@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import torch
 
-from poincar3.benchmarks.see_se3.scene import Scene
+from models.poincar3.benchmarks.see_se3.scene import Scene
 
 
 def list_scenes(

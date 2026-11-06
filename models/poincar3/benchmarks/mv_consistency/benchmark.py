@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torchvision
 from tqdm import tqdm
 
-from poincar3.benchmarks.dense_features import (
+from models.poincar3.benchmarks.dense_features import (
     extract_dense_features,
     extract_dense_features_at_block,
     extract_global_attention_qk,
@@ -20,7 +20,7 @@ from poincar3.benchmarks.dense_features import (
     get_feature_probe,
     resolve_block_fraction,
 )
-from poincar3.distrib import is_main_process
+from models.poincar3.distrib import is_main_process
 
 from .megadepth import MegaDepth
 from .navi import NAVI

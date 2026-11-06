@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from poincar3.model import _build_encoder
+from models.poincar3.model import _build_encoder
 
 from .common import EncoderOnlyBaseline
 

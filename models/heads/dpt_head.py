@@ -508,21 +508,21 @@ def custom_interpolate(
 
 
 
-
 class LayeredDPTHead(nn.Module):
     """
     DPT head for LAYERED depth: N depths per pixel, sorted near -> far along the ray
     (layer 0 = the visible surface = ordinary depth, layer 1 = the next surface behind it, ...),
-    and for each layer whether it exists. No confidence.
+    and the ray stopping logits (LaRI): N + 1 classes per pixel, class 0 = the ray hits nothing, class c = the ray
+    stops at layer c - 1 (layers 0 .. c-1 exist). No confidence.
  
     Standalone (no inheritance): same trunk as DPTHead (norm, projects, resize_layers, scratch with the same
-    module names), only the last 1x1 conv and the activation differ. Output channels (2N):
-        [ depth_1 ... depth_N | exist_1 ... exist_N ]
+    module names), only the last 1x1 conv and the activation differ. Output channels (2N + 1):
+        [ depth_1 ... depth_N | stop_0 ... stop_N ]
     depth_k: activated with `activation` ("exp" -> metric depth > 0, the network predicts log-depth).
-    exist_k: raw logit, sigmoid(exist_k) = P(the pixel's ray has a k-th surface). Needed because pixels have
-             different numbers of layers; at test time layer k is used where sigmoid > 0.5.
+    stop_c:  raw logits, softmax over c = P(the ray stops at index c). At test time C = argmax_c and layer k is
+             used where k + 1 <= C (LayeredDepthLoss.stop_index_to_mask): the layer masks are ordered by construction.
  
-    Returns (depth, exist_logits), each (B, S, N, H, W).
+    Returns (depth (B, S, N, H, W), stop_logits (B, S, N + 1, H, W)).
     """
  
     def __init__(
@@ -547,7 +547,7 @@ class LayeredDPTHead(nn.Module):
         self.pos_embed = pos_embed
         self.down_ratio = down_ratio
         self.intermediate_layer_idx = intermediate_layer_idx
-        output_dim = 2 * num_layers                           # N depths + N existence logits
+        output_dim = 2 * num_layers + 1                       # N depths + (N + 1) ray stopping logits
  
         self.norm = nn.LayerNorm(dim_in)
  
@@ -597,7 +597,7 @@ class LayeredDPTHead(nn.Module):
             frames_chunk_size (int, optional): frames per chunk; None or >= S processes all frames at once.
  
         Returns:
-            depth (B, S, N, H, W), exist_logits (B, S, N, H, W).
+            depth (B, S, N, H, W), stop_logits (B, S, N + 1, H, W).
         """
         S = images.shape[1]
         if frames_chunk_size is None or frames_chunk_size >= S:
@@ -655,14 +655,14 @@ class LayeredDPTHead(nn.Module):
         if self.pos_embed:
             out = self._apply_pos_embed(out, W, H)
  
-        out = self.scratch.output_conv2(out)                  # (B*S, 2N, H, W)
+        out = self.scratch.output_conv2(out)                  # (B*S, 2N + 1, H, W)
         return self._activate(out, B, S)
  
     def _activate(self, out: torch.Tensor, B: int, S: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """(B*S, 2N, H, W) -> depth (B, S, N, H, W) after the depth activation, exist logits (B, S, N, H, W)."""
+        """(B*S, 2N + 1, H, W) -> depth (B, S, N, H, W) after the depth activation, stop logits (B, S, N + 1, H, W)."""
         N = self.num_layers
         H, W = out.shape[-2:]
-        raw_depth, exist = out[:, :N], out[:, N:2 * N]
+        raw_depth, stop = out[:, :N], out[:, N:2 * N + 1]
         if self.activation == "exp":
             depth = torch.exp(raw_depth)
         elif self.activation == "softplus":
@@ -671,7 +671,7 @@ class LayeredDPTHead(nn.Module):
             depth = F.relu(raw_depth)
         else:                                                 # "linear"
             depth = raw_depth
-        return depth.reshape(B, S, N, H, W), exist.reshape(B, S, N, H, W)
+        return depth.reshape(B, S, N, H, W), stop.reshape(B, S, N + 1, H, W)
  
     def _apply_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
         """Apply positional embedding to tensor x."""
@@ -697,4 +697,200 @@ class LayeredDPTHead(nn.Module):
         out = self.scratch.refinenet2(out, layer_2_rn, size=layer_1_rn.shape[2:])
         out = self.scratch.refinenet1(out, layer_1_rn)
         return self.scratch.output_conv1(out)
+
+# class LayeredDPTHead(nn.Module):
+#     """
+#     DPT head for LAYERED depth: N depths per pixel, sorted near -> far along the ray
+#     (layer 0 = the visible surface = ordinary depth, layer 1 = the next surface behind it, ...),
+#     and the ray stopping logits (LaRI): N + 1 classes per pixel, class 0 = the ray hits nothing, class c = the ray
+#     stops at layer c - 1 (layers 0 .. c-1 exist). No confidence.
  
+#     Standalone (no inheritance): same trunk as DPTHead (norm, projects, resize_layers, scratch with the same
+#     module names, output_conv1 shared). The last block is separate per output (as LaRI's per-layer output blocks):
+#         scratch.output_conv2[k]  (3x3 conv -> ReLU -> 1x1 conv -> 1 channel)      depth of layer k, k = 0 .. N-1
+#         scratch.stop_conv        (3x3 conv -> ReLU -> 1x1 conv -> N + 1 channels) ray stopping logits
+#     so layer 0 (the visible surface), the hidden layers and the stopping index do not share one output map.
+#     depth_k: activated with `activation` ("exp" -> metric depth > 0, the network predicts log-depth).
+#     stop_c:  raw logits, softmax over c = P(the ray stops at index c). At test time C = argmax_c and layer k is
+#              used where k + 1 <= C (LayeredDepthLoss.stop_index_to_mask): the layer masks are ordered by construction.
+ 
+#     Returns (depth (B, S, N, H, W), stop_logits (B, S, N + 1, H, W)).
+#     """
+ 
+#     def __init__(
+#         self,
+#         dim_in: int,
+#         num_layers: int = 1,
+#         patch_size: int = 14,
+#         activation: str = "exp",
+#         features: int = 128,                                  # modify for vit base
+#         out_channels: List[int] = [96, 192, 384, 768],        # modified for vit base
+#         intermediate_layer_idx: List[int] = [2, 5, 8, 11],
+#         pos_embed: bool = True,
+#         down_ratio: int = 1,
+#         **unused,                                             # e.g. conf_activation from older configs: ignored
+#     ) -> None:
+#         super().__init__()
+#         if activation not in ("exp", "softplus", "relu", "linear"):
+#             raise ValueError(f"Unsupported depth activation for LayeredDPTHead: {activation}")
+#         self.num_layers = num_layers
+#         self.patch_size = patch_size
+#         self.activation = activation
+#         self.pos_embed = pos_embed
+#         self.down_ratio = down_ratio
+#         self.intermediate_layer_idx = intermediate_layer_idx
+ 
+#         self.norm = nn.LayerNorm(dim_in)
+ 
+#         # Projection layers for each output channel from tokens.
+#         self.projects = nn.ModuleList(
+#             [nn.Conv2d(in_channels=dim_in, out_channels=oc, kernel_size=1, stride=1, padding=0) for oc in out_channels]
+#         )
+ 
+#         # Resize layers for upsampling feature maps.
+#         self.resize_layers = nn.ModuleList(
+#             [
+#                 nn.ConvTranspose2d(out_channels[0], out_channels[0], kernel_size=4, stride=4, padding=0),
+#                 nn.ConvTranspose2d(out_channels[1], out_channels[1], kernel_size=2, stride=2, padding=0),
+#                 nn.Identity(),
+#                 nn.Conv2d(out_channels[3], out_channels[3], kernel_size=3, stride=2, padding=1),
+#             ]
+#         )
+ 
+#         self.scratch = _make_scratch(out_channels, features, expand=False)
+#         self.scratch.stem_transpose = None
+#         self.scratch.refinenet1 = _make_fusion_block(features)
+#         self.scratch.refinenet2 = _make_fusion_block(features)
+#         self.scratch.refinenet3 = _make_fusion_block(features)
+#         self.scratch.refinenet4 = _make_fusion_block(features, has_residual=False)
+ 
+#         head_features_1 = features
+#         head_features_2 = 32
+#         self.scratch.output_conv1 = nn.Conv2d(head_features_1, head_features_1 // 2, kernel_size=3, stride=1, padding=1)
+
+#         def output_block(out_dim):
+#             return nn.Sequential(
+#                 nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
+#                 nn.ReLU(inplace=True),
+#                 nn.Conv2d(head_features_2, out_dim, kernel_size=1, stride=1, padding=0),
+#             )
+
+#         self.scratch.output_conv2 = nn.ModuleList([output_block(1) for _ in range(num_layers)])   # one per layer
+#         self.scratch.stop_conv = output_block(num_layers + 1)                                    # stopping logits
+ 
+#     def forward(
+#         self,
+#         aggregated_tokens_list: List[torch.Tensor],
+#         images: torch.Tensor,
+#         patch_start_idx: int,
+#         frames_chunk_size: int = 8,
+#     ) -> Tuple[torch.Tensor, torch.Tensor]:
+#         """
+#         Args:
+#             aggregated_tokens_list (List[Tensor]): token tensors from the transformer layers, each (B, S, T, C).
+#             images (Tensor): (B, S, 3, H, W) in [0, 1].
+#             patch_start_idx (int): index of the first patch token (after camera / register tokens).
+#             frames_chunk_size (int, optional): frames per chunk; None or >= S processes all frames at once.
+ 
+#         Returns:
+#             depth (B, S, N, H, W), stop_logits (B, S, N + 1, H, W).
+#         """
+#         S = images.shape[1]
+#         if frames_chunk_size is None or frames_chunk_size >= S:
+#             return self._forward_impl(aggregated_tokens_list, images, patch_start_idx)
+ 
+#         assert frames_chunk_size > 0
+#         all_depth, all_exist = [], []
+#         for frames_start_idx in range(0, S, frames_chunk_size):
+#             frames_end_idx = min(frames_start_idx + frames_chunk_size, S)
+#             depth, exist = self._forward_impl(
+#                 aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
+#             )
+#             all_depth.append(depth)
+#             all_exist.append(exist)
+#         return torch.cat(all_depth, dim=1), torch.cat(all_exist, dim=1)
+ 
+#     def _forward_impl(
+#         self,
+#         aggregated_tokens_list: List[torch.Tensor],
+#         images: torch.Tensor,
+#         patch_start_idx: int,
+#         frames_start_idx: int = None,
+#         frames_end_idx: int = None,
+#     ) -> Tuple[torch.Tensor, torch.Tensor]:
+#         if frames_start_idx is not None and frames_end_idx is not None:
+#             images = images[:, frames_start_idx:frames_end_idx].contiguous()
+ 
+#         B, S, _, H, W = images.shape
+#         patch_h, patch_w = H // self.patch_size, W // self.patch_size
+ 
+#         out = []
+#         for dpt_idx, layer_idx in enumerate(self.intermediate_layer_idx):
+#             x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
+#             if frames_start_idx is not None and frames_end_idx is not None:
+#                 x = x[:, frames_start_idx:frames_end_idx]
+ 
+#             x = x.reshape(B * S, -1, x.shape[-1])
+#             x = self.norm(x)
+#             x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
+ 
+#             x = self.projects[dpt_idx](x)
+#             if self.pos_embed:
+#                 x = self._apply_pos_embed(x, W, H)
+#             x = self.resize_layers[dpt_idx](x)
+#             out.append(x)
+ 
+#         # Fuse features from multiple layers, then back to the image resolution.
+#         out = self.scratch_forward(out)
+#         out = custom_interpolate(
+#             out,
+#             (int(patch_h * self.patch_size / self.down_ratio), int(patch_w * self.patch_size / self.down_ratio)),
+#             mode="bilinear",
+#             align_corners=True,
+#         )
+#         if self.pos_embed:
+#             out = self._apply_pos_embed(out, W, H)
+ 
+#         raw_depth = torch.cat([block(out) for block in self.scratch.output_conv2], dim=1)   # (B*S, N, H, W)
+#         stop = self.scratch.stop_conv(out)                                                  # (B*S, N + 1, H, W)
+#         return self._activate(raw_depth, stop, B, S)
+ 
+#     def _activate(self, raw_depth: torch.Tensor, stop: torch.Tensor, B: int, S: int) -> Tuple[torch.Tensor, torch.Tensor]:
+#         """raw depth (B*S, N, H, W), stop logits (B*S, N + 1, H, W) -> depth (B, S, N, H, W) after the depth
+#         activation, stop logits (B, S, N + 1, H, W)."""
+#         N = self.num_layers
+#         H, W = raw_depth.shape[-2:]
+#         if self.activation == "exp":
+#             depth = torch.exp(raw_depth)
+#         elif self.activation == "softplus":
+#             depth = F.softplus(raw_depth)
+#         elif self.activation == "relu":
+#             depth = F.relu(raw_depth)
+#         else:                                                 # "linear"
+#             depth = raw_depth
+#         return depth.reshape(B, S, N, H, W), stop.reshape(B, S, N + 1, H, W)
+ 
+#     def _apply_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
+#         """Apply positional embedding to tensor x."""
+#         patch_w = x.shape[-1]
+#         patch_h = x.shape[-2]
+#         pos_embed = create_uv_grid(patch_w, patch_h, aspect_ratio=W / H, dtype=x.dtype, device=x.device)
+#         pos_embed = position_grid_to_embed(pos_embed, x.shape[1])
+#         pos_embed = pos_embed * ratio
+#         pos_embed = pos_embed.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
+#         return x + pos_embed
+ 
+#     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
+#         """Forward pass through the fusion blocks."""
+#         layer_1, layer_2, layer_3, layer_4 = features
+ 
+#         layer_1_rn = self.scratch.layer1_rn(layer_1)
+#         layer_2_rn = self.scratch.layer2_rn(layer_2)
+#         layer_3_rn = self.scratch.layer3_rn(layer_3)
+#         layer_4_rn = self.scratch.layer4_rn(layer_4)
+ 
+#         out = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
+#         out = self.scratch.refinenet3(out, layer_3_rn, size=layer_2_rn.shape[2:])
+#         out = self.scratch.refinenet2(out, layer_2_rn, size=layer_1_rn.shape[2:])
+#         out = self.scratch.refinenet1(out, layer_1_rn)
+#         return self.scratch.output_conv1(out)

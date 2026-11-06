@@ -5,12 +5,13 @@ from typing import Literal
 
 import torch.nn as nn
 
-from poincar3.baselines.common import EncoderOnlyBaseline
-from poincar3.baselines.dinov3 import load_frozen_dinov3_vitl
-from poincar3.baselines.mum.adapter import load_mum_v1_baseline
-from poincar3.device import device
-from poincar3.model import Poincar3, SSLModel
-from poincar3.run import load_run
+from models.poincar3.baselines.common import EncoderOnlyBaseline
+from models.poincar3.baselines.dinov3 import load_frozen_dinov3_vitl
+from models.poincar3.baselines.mum.adapter import load_mum_v1_baseline
+from models.poincar3.device import device
+from models.poincar3.model import Poincar3, SSLModel
+from models.poincar3.run import load_run
+import torch
 
 Backbone = Literal[
     "poincar3",

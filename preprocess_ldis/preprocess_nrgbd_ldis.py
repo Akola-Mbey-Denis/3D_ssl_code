@@ -6,11 +6,11 @@ Input (raw NRGBD, read as in nrgbd_overlaps.py):
     <root>/<scene>/images/img<i>.png        RGB, 640 x 480
                    depth/depth<i>.png       uint16 millimetres (-> metres, 0 = invalid)
                    poses.txt                4 lines per frame, OpenGL cam2world (frame i = block i); 'nan' = invalid frame
-                   gt_mesh.ply              full ground-truth mesh (same world frame as poses.txt)
+                   gt_mesh_culled.ply       ground-truth mesh, frustum-culled (same world frame as poses.txt)
     Intrinsics are the same for every scene: fx = fy = 554.2562584220408, cx = 320, cy = 240.
     The mesh is read from <root>/<scene>/<mesh_name>, or from <root>/meshes/<scene>/<mesh_name> if not there.
-    Use the FULL gt_mesh.ply: gt_mesh_culled.ply has the unobserved geometry removed (exactly the hidden surfaces an
-    LDI needs), neural_rgbd.ply is a reconstruction, not ground truth.
+    gt_mesh_culled.ply (default) drops geometry outside every camera's frustum; gt_mesh.ply is the full mesh;
+    neural_rgbd.ply is a reconstruction, not ground truth.
 
 Every frame is cropped / resized to 224 x 224 exactly like the dataloaders (crop around the principal point, then
 resize, aug_crop=-1) -> K at 224, then one ray per pixel is cast into the mesh (trimesh + embree, all hits), hits
@@ -25,6 +25,15 @@ Output, one file per frame, named like the frame:
 
 Back faces: hidden layers keep only front-facing hits by default (as for Matterport3D / ARKitScenes; NRGBD meshes are
 clean synthetic meshes); --keep_back_faces keeps them (as the ScanNet default).
+Exit rule (default on, --no_require_exit to disable): a hidden front-facing hit is kept only if the ray EXITED the
+previous kept surface first, i.e. a back-facing hit lies between them. Back-face culling alone fails on slabs /
+walls modelled as two surfaces that both face the room (e.g. ceiling underside + a downward-facing roof plane): the
+second surface is front-facing but lies inside the solid, so it is a wall / slab thickness, not an occluded surface.
+Real occluded surfaces are reached after leaving the occluder (table top: top face -> bottom face (exit) -> floor).
+Room bounds (default on, --no_room_bounds to disable): hidden hits outside the scene's observed envelope are dropped.
+The envelope is the robust (--bounds_pct) axis-aligned box of all GT depth points of the scene, + --bounds_margin.
+Removes geometry modelled beyond the room shell that the exit rule cannot (lamp cords continuing through the ceiling,
+objects behind walls) -- nothing outside the walls / above the ceiling is ever visible in NRGBD.
 
 Logs are only printed (no files): [SKIP] / [WARN] per frame, one summary line per scene. Layer 1 should agree with
 the NRGBD depth maps almost everywhere (they were rendered from this mesh); a low agreement means a pose / mesh-frame
@@ -33,6 +42,7 @@ problem, not noisy data.
 Usage:
     python dump_ldis_nrgbd.py --root /scratch/dma9300/nrgbd/NRGBD/ --start_idx 0 --end_idx 10   # scenes 0..9
     python dump_ldis_nrgbd.py --root ... --scenes breakfast_room --max_frames 5 --plot --save_ply   # quick check
+    python dump_ldis_nrgbd.py --root ... --scenes breakfast_room --debug_once --debug_ply   # point map + pdb, 1 frame
     (--save_ply: <plot_dir>/<scene>/<frame>_ldi.ply, visible layer in image colours, hidden layers coloured by
      their surface normal (n + 1) / 2, all views in the same world frame -> open several frames together)
 """
@@ -154,13 +164,18 @@ def generate_rays(K, c2w, H, W):
 
 
 def generate_layered_depths(mesh, ray_origins, ray_dirs, H, W, max_layers=4, min_depth=0.001, max_depth=16.0,
-                            front_only=True, min_sep=16.0 / 256, intersector=None, return_normals=False):
+                            front_only=True, min_sep=16.0 / 256, intersector=None, return_normals=False,
+                            require_exit=True, bounds=None):
     """
     LDI by intersecting one ray per pixel with the mesh (all hits per ray).
 
     Hits outside [min_depth, max_depth] are dropped and the rest are sorted by distance.
     With front_only, hidden layers keep only front-facing hits (surfaces the ray enters);
     the first hit is always kept, so layer 1 is the visible surface.
+    With require_exit (and front_only), a hidden front-facing hit is kept only if a back-facing hit (the ray leaving
+    the previous kept surface's solid) lies between it and the previous kept hit -- drops the far side of
+    two-surface walls / ceiling slabs whose surfaces both face the camera.
+    bounds=(lo, hi) world-frame box: hidden hits (not the visible first hit) outside it are dropped.
     Consecutive kept layers are at least min_sep apart along the ray; the nearer hit wins.
 
     Returns
@@ -182,18 +197,47 @@ def generate_layered_depths(mesh, ray_origins, ray_dirs, H, W, max_layers=4, min
     if len(locations) > 0:
         depths = np.linalg.norm(locations - ray_origins[index_ray], axis=1)
         valid = (depths >= min_depth) & (depths <= max_depth)
-        depths, index_ray, index_tri = depths[valid], index_ray[valid], index_tri[valid]
+        depths, index_ray, index_tri, locations = depths[valid], index_ray[valid], index_tri[valid], locations[valid]
 
         order = np.lexsort((depths, index_ray))                       # by ray, then by distance
-        depths, index_ray, index_tri = depths[order], index_ray[order], index_tri[order]
+        depths, index_ray, index_tri, locations = depths[order], index_ray[order], index_tri[order], locations[order]
 
         is_front = (mesh.face_normals[index_tri] * ray_dirs[index_ray]).sum(-1) < 0
 
-        if front_only:
+        if front_only and require_exit and len(depths) > 0:       # front hit only after leaving the previous solid
+            first = np.searchsorted(index_ray, index_ray, side="left")
+            rank = np.arange(len(index_ray)) - first
+            exited = np.zeros(n, bool)                                 # back hit seen since the last kept hit
+            keep_hit = np.zeros(len(depths), bool)
+            for j in range(rank.max() + 1):
+                idx = np.nonzero(rank == j)[0]
+                r = index_ray[idx]
+                if j == 0:                                             # visible surface: always kept
+                    keep_hit[idx] = True
+                    continue
+                ok = is_front[idx] & exited[r]
+                keep_hit[idx[ok]] = True
+                exited[r[ok]] = False
+                back = ~is_front[idx]
+                exited[r[back]] = True
+            depths, index_ray, is_front, index_tri, locations = (depths[keep_hit], index_ray[keep_hit],
+                                                                 is_front[keep_hit], index_tri[keep_hit],
+                                                                 locations[keep_hit])
+        elif front_only:
             is_first = np.r_[True, index_ray[1:] != index_ray[:-1]]
             keep_hit = is_first | is_front
-            depths, index_ray, is_front, index_tri = (depths[keep_hit], index_ray[keep_hit], is_front[keep_hit],
-                                                      index_tri[keep_hit])
+            depths, index_ray, is_front, index_tri, locations = (depths[keep_hit], index_ray[keep_hit],
+                                                                 is_front[keep_hit], index_tri[keep_hit],
+                                                                 locations[keep_hit])
+
+        if bounds is not None and len(depths) > 0:                     # hidden hits outside the room: drop
+            lo, hi = bounds
+            inside = np.all((locations >= lo) & (locations <= hi), axis=1)
+            is_first = np.r_[True, index_ray[1:] != index_ray[:-1]]
+            keep_hit = is_first | inside
+            depths, index_ray, is_front, index_tri, locations = (depths[keep_hit], index_ray[keep_hit],
+                                                                 is_front[keep_hit], index_tri[keep_hit],
+                                                                 locations[keep_hit])
 
         if min_sep > 0 and len(depths) > 0:                            # separation to the previous KEPT hit
             first = np.searchsorted(index_ray, index_ray, side="left")
@@ -263,6 +307,49 @@ def plot_gt_depth_and_ldi(gt_depth, ldi_depth, save_path, vmin=0.0, vmax=10.0, c
     plt.close(fig)
 
 
+def ldi_to_pointmap(ldi_depth, K, c2w):
+    """LDI z-depths (H, W, L) -> point maps: world (H, W, L, 3), camera (H, W, L, 3), valid (H, W, L).
+    Invalid (depth 0) points are 0. c2w is OpenCV cam2world."""
+    H, W, L = ldi_depth.shape
+    v, u = np.mgrid[0:H, 0:W].astype(np.float64)
+    rays = np.stack([u, v, np.ones_like(u)], -1) @ np.linalg.inv(K).T                # (H, W, 3), z = 1
+    valid = np.isfinite(ldi_depth) & (ldi_depth > 0)
+    cam = rays[:, :, None, :] * np.where(valid, ldi_depth, 0.0)[..., None]           # (H, W, L, 3)
+    world = cam @ c2w[:3, :3].T + c2w[:3, 3]
+    world[~valid] = 0.0
+    return world.astype(np.float32), cam.astype(np.float32), valid
+
+
+def debug_pointmap(ldi_depth, depth, K, c2w, bounds=None):
+    """Point maps of one frame's LDI + GT depth, with a short printout. Returns a dict for inspection."""
+    pm_world, pm_cam, valid = ldi_to_pointmap(ldi_depth, K, c2w)
+    gt_world, gt_cam, gt_valid = ldi_to_pointmap(depth[..., None], K, c2w)
+    gt_world, gt_cam, gt_valid = gt_world[..., 0, :], gt_cam[..., 0, :], gt_valid[..., 0]
+    print(f"[DEBUG] K =\n{np.round(K, 2)}\n[DEBUG] cam centre {np.round(c2w[:3, 3], 3)}")
+    for k in range(ldi_depth.shape[-1]):
+        m = valid[..., k]
+        if not m.any():
+            print(f"[DEBUG] layer {k}: empty")
+            continue
+        z, p = ldi_depth[..., k][m], pm_world[..., k, :][m]
+        print(f"[DEBUG] layer {k}: {m.mean():6.1%} px | z {z.min():.3f}..{np.median(z):.3f}..{z.max():.3f} m | "
+              f"world lo {np.round(p.min(0), 2)} hi {np.round(p.max(0), 2)}")
+    both = valid[..., 0] & gt_valid
+    if both.any():
+        e = np.linalg.norm(pm_world[..., 0, :][both] - gt_world[both], axis=-1)
+        print(f"[DEBUG] layer 0 vs GT depth (3D): median {np.median(e) * 100:.2f} cm, "
+              f"<5 cm {(e < 0.05).mean():.1%}, p95 {np.percentile(e, 95) * 100:.1f} cm")
+    if valid.shape[-1] > 1:
+        gap = (ldi_depth[..., 1] - ldi_depth[..., 0])[valid[..., 1]]
+        if gap.size:
+            print(f"[DEBUG] layer 1 - layer 0 gap: median {np.median(gap):.3f} m, min {gap.min():.3f} m")
+    if bounds is not None:
+        lo, hi = bounds
+        print(f"[DEBUG] room bounds lo {np.round(lo, 2)} hi {np.round(hi, 2)}")
+    return {"pm_world": pm_world, "pm_cam": pm_cam, "valid": valid,
+            "gt_world": gt_world, "gt_cam": gt_cam, "gt_valid": gt_valid}
+
+
 def save_ldi_ply(ldi_depth, normals, rgb, K, c2w, ply_path, color_first="rgb"):
     """
     LDI of one frame as a world-frame point cloud (.ply):
@@ -293,6 +380,27 @@ def save_ldi_ply(ldi_depth, normals, rgb, K, c2w, ply_path, color_first="rgb"):
     os.makedirs(osp.dirname(ply_path) or ".", exist_ok=True)
     trimesh.PointCloud(pts, colors=(cols * 255).astype(np.uint8)).export(ply_path)
     return len(pts)
+
+
+def scene_bounds(scene_dir, frames, poses, pct=0.5, margin=0.05, frame_step=5, px_step=8):
+    """Robust world-frame box (lo, hi) of the scene's observed geometry: GT depth points of every frame_step-th
+    frame, every px_step-th pixel, unprojected with the raw NRGBD K; pct / 100 - pct percentiles, + margin."""
+    v, u = np.mgrid[0:480:px_step, 0:640:px_step].astype(np.float64)
+    rays = np.stack([u, v, np.ones_like(u)], -1) @ np.linalg.inv(NRGBD_K).T            # (h, w, 3), z = 1
+    pts = []
+    for f in frames[::frame_step]:
+        i = frame_index(f)
+        path = osp.join(scene_dir, "depth", f"depth{i}.png")
+        if not osp.exists(path):
+            continue
+        d = load_depth(path)[::px_step, ::px_step]
+        m = d > 0
+        c2w = opengl_to_opencv(poses[i])
+        pts.append((rays[m] * d[m][:, None]) @ c2w[:3, :3].T + c2w[:3, 3])
+    if not pts:
+        return None
+    pts = np.concatenate(pts)
+    return np.percentile(pts, pct, axis=0) - margin, np.percentile(pts, 100 - pct, axis=0) + margin
 
 
 # ======================================================================
@@ -335,6 +443,8 @@ def process_scene(scene, args):
         print(f"[WARN] {scene}: {len(frames)} images but {len(poses)} poses -- frames are matched by their index")
     n_invalid = sum(1 for f in frames if frame_index(f) >= len(poses) or poses[frame_index(f)] is None)
     frames = [f for f in frames if frame_index(f) < len(poses) and poses[frame_index(f)] is not None]
+    if args.frames:                                                  # only these frames (e.g. img120 img450)
+        frames = [f for f in frames if osp.splitext(f)[0] in set(args.frames)]
     if args.max_frames:
         frames = frames[:args.max_frames]
     if not args.overwrite:                                           # only the frames without an LDI yet
@@ -342,6 +452,15 @@ def process_scene(scene, args):
     if not frames:
         return f"all frames already done ({n_invalid} invalid-pose frames skipped)"
     os.makedirs(out_dir, exist_ok=True)
+
+    bounds = None
+    if not args.no_room_bounds:
+        all_valid = [f for f in sorted(os.listdir(rgb_dir), key=frame_index)
+                     if f.lower().endswith((".png", ".jpg", ".jpeg"))
+                     and frame_index(f) < len(poses) and poses[frame_index(f)] is not None]
+        bounds = scene_bounds(scene_dir, all_valid, poses, pct=args.bounds_pct, margin=args.bounds_margin)
+        if bounds is not None:
+            tqdm.write(f"{scene}: room bounds lo {np.round(bounds[0], 2)} hi {np.round(bounds[1], 2)} (m)")
 
     mesh, intersector = None, None                                   # loaded only if a frame needs it
     rng = np.random.default_rng(seed=42)                             # unused for square 224 x 224 crops
@@ -371,7 +490,7 @@ def process_scene(scene, args):
         ldi_dist, facing, normals = generate_layered_depths(
             mesh, ray_origins, ray_dirs, H, W, max_layers=args.num_layers, min_depth=args.min_depth,
             max_depth=args.max_depth, front_only=not args.keep_back_faces, min_sep=args.min_sep,
-            intersector=intersector, return_normals=True)
+            intersector=intersector, return_normals=True, require_exit=not args.no_require_exit, bounds=bounds)
         ldi_depth = ray_distance_to_depth(ldi_dist, K)
 
         if args.save_ply:
@@ -382,7 +501,16 @@ def process_scene(scene, args):
             plot_gt_depth_and_ldi(depth, ldi_depth, osp.join(args.plot_dir, scene, f"{stem}_gt_depth_and_ldi.png"),
                                   title=f"{scene}/{stem}")
 
-        # breakpoint()
+        if args.debug:                                               # one LDI -> point map, then stop
+            dbg = debug_pointmap(ldi_depth, depth, K, c2w, bounds=bounds)
+            pm_world, valid = dbg["pm_world"], dbg["valid"]          # (H, W, L, 3), (H, W, L)
+            if args.debug_ply:
+                p = osp.join(args.plot_dir, scene, f"{stem}_debug_pointmap.ply")
+                save_ldi_ply(ldi_depth, normals, np.asarray(image), K, c2w, p, color_first=args.ply_first_layer)
+                print(f"[DEBUG] point map -> {p}")
+            breakpoint()   # inspect: pm_world, valid, dbg['gt_world'], ldi_depth, facing, normals, K, c2w, bounds
+            if args.debug_once:
+                raise SystemExit("[DEBUG] stopped after one frame (--debug_once)")
 
         ldi = ldi_depth if args.ldi_type == "z_depth" else ldi_dist
         ldi = np.where(np.isfinite(ldi) & (ldi > 0), ldi, 0.0).astype(np.float16)   # invalid / no surface = 0
@@ -417,13 +545,22 @@ def get_args():
     p = argparse.ArgumentParser(description="Mesh LDIs (224 x 224, 4 layers, float16) for every valid NRGBD frame")
     p.add_argument("--root", type=str, default="/scratch/dma9300/nrgbd/NRGBD/", help="NRGBD root, one folder per scene")
     p.add_argument("--out_root", type=str, default=None, help="LDIs go to <out_root>/LDIs/<scene>/ (default: root)")
-    p.add_argument("--mesh_name", type=str, default="gt_mesh.ply", help="full GT mesh (not gt_mesh_culled.ply)")
+    p.add_argument("--mesh_name", type=str, default="gt_mesh_culled.ply",
+                   help="GT mesh file: gt_mesh_culled.ply (frustum-culled, default) or gt_mesh.ply (full)")
     p.add_argument("--flip_faces", action="store_true", help="invert the face winding (if layer 1 is mostly back-facing)")
     p.add_argument("--keep_back_faces", action="store_true",
                    help="keep back-facing hits in the hidden layers (default: front-facing only, as Matterport / ARKit)")
+    p.add_argument("--no_room_bounds", action="store_true",
+                   help="keep hidden hits outside the scene's observed envelope (e.g. lamp cords through the ceiling)")
+    p.add_argument("--bounds_pct", type=float, default=0.5,
+                   help="room envelope = [pct, 100 - pct] percentiles of the GT depth points per axis")
+    p.add_argument("--bounds_margin", type=float, default=0.05, help="margin (m) added around the room envelope")
+    p.add_argument("--no_require_exit", action="store_true",
+                   help="keep hidden front-facing hits even without a back-facing exit before them (old behaviour)")
     p.add_argument("--scenes", nargs="+", default=None, help="only these scenes (default: all, or --start_idx / --end_idx)")
     p.add_argument("--start_idx", type=int, default=0, help="first scene (index in the sorted scene list)")
     p.add_argument("--end_idx", type=int, default=None, help="end scene, exclusive (default: all)")
+    p.add_argument("--frames", nargs="+", default=None, help="only these frames, by stem (e.g. img120 img450)")
     p.add_argument("--max_frames", type=int, default=None, help="debug: only the first N valid frames per scene")
     p.add_argument("--resolution", type=int, default=224)
     p.add_argument("--num_layers", type=int, default=4)
@@ -439,12 +576,21 @@ def get_args():
                    help="colour of the visible layer in the .ply (image colours or surface normal)")
     p.add_argument("--plot_dir", type=str, default="./ldi_check_nrgbd", help="figures / .ply files go here")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--debug", action="store_true",
+                   help="after each frame's LDI: build its point map, print stats, drop into pdb (c = next frame)")
+    p.add_argument("--debug_once", action="store_true", help="with --debug: exit after the first frame")
+    p.add_argument("--debug_ply", action="store_true", help="with --debug: also save the frame's point map as .ply")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = get_args()
     args.out_root = args.out_root or args.root
+    if args.debug_once or args.debug_ply:
+        args.debug = True
+    if args.debug:                       # don't skip already-dumped frames, but don't overwrite them either
+        args.overwrite = True
+        args.out_root = osp.join(args.plot_dir, "debug_out")
     scenes = list_scenes(args.root)
     if args.scenes:
         missing = [s for s in args.scenes if s not in scenes]

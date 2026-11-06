@@ -21,15 +21,15 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
-from poincar3.benchmarks.mv_consistency import MvConsistencyBenchmark
-from poincar3.data.dynamic import DynamicBatchSampler, DynamicSampler
-from poincar3.data.sequence_data import ComposedSequenceDataset, ScanNetPlusPlusSequence, VideoFrameSequence
-from poincar3.device import device
-from poincar3.distrib import is_distributed, is_main_process
-from poincar3.logging import logger
-from poincar3.loss import Poincar3Loss
-from poincar3.model import Poincar3
-from poincar3.types import Batch
+from models.poincar3.benchmarks.mv_consistency import MvConsistencyBenchmark
+from models.poincar3.data.dynamic import DynamicBatchSampler, DynamicSampler
+from models.poincar3.data.sequence_data import ComposedSequenceDataset, ScanNetPlusPlusSequence, VideoFrameSequence
+from models.poincar3.device import device
+from models.poincar3.distrib import is_distributed, is_main_process
+from models.poincar3.logging import logger
+from models.poincar3.loss import Poincar3Loss
+from models.poincar3.model import Poincar3
+from models.poincar3.types import Batch
 
 EvalCallback = Callable[[nn.Module, int, Path], None]
 

@@ -10,15 +10,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from poincar3.benchmarks.dense_features import get_attention_probe, get_feature_probe, resolve_block_fraction
-from poincar3.benchmarks.see_se3.poincare import fit_poincare_adapter
-from poincar3.benchmarks.see_se3.pose import pose9d, relative_pose_targets
-from poincar3.benchmarks.see_se3.scannet import load_scene_images
-from poincar3.benchmarks.see_se3.scannet import list_scenes as _list_scannet_scenes
-from poincar3.benchmarks.see_se3.scannet import load_scene as _load_scannet_scene
-from poincar3.benchmarks.see_se3.scannetpp import list_scenes as _list_scannetpp_scenes
-from poincar3.benchmarks.see_se3.scannetpp import load_scene as _load_scannetpp_scene
-from poincar3.benchmarks.see_se3.scene import Scene
+from models.poincar3.benchmarks.dense_features import get_attention_probe, get_feature_probe, resolve_block_fraction
+from models.poincar3.benchmarks.see_se3.poincare import fit_poincare_adapter
+from models.poincar3.benchmarks.see_se3.pose import pose9d, relative_pose_targets
+from models.poincar3.benchmarks.see_se3.scannet import load_scene_images
+from models.poincar3.benchmarks.see_se3.scannet import list_scenes as _list_scannet_scenes
+from models.poincar3.benchmarks.see_se3.scannet import load_scene as _load_scannet_scene
+from models.poincar3.benchmarks.see_se3.scannetpp import list_scenes as _list_scannetpp_scenes
+from models.poincar3.benchmarks.see_se3.scannetpp import load_scene as _load_scannetpp_scene
+from models.poincar3.benchmarks.see_se3.scene import Scene
 
 
 def _mutual_knn(features: torch.Tensor, poses_9d: torch.Tensor, k: int, min_temporal_gap: int) -> float | None:

@@ -412,9 +412,9 @@ class Vista(nn.Module):
         target = L - len_keep
 
         if target == 0:
-            ids_restore = torch.arange(L, device=device).expand(N, -1)
             mask = torch.zeros(N, L, device=device)
-            return x, mask, ids_restore
+            
+            return mask
 
         noise = torch.rand(N, H, W, device=device)
 
@@ -533,18 +533,18 @@ class Vista(nn.Module):
 
         # One sort per batch of views. The last `target` patches are masked.
         ids_shuffle = torch.argsort(scores, dim=1)
-        ids_keep = ids_shuffle[:, :len_keep]
+        # ids_keep = ids_shuffle[:, :len_keep]
 
         # Invert the permutation without a second argsort.
-        ids_restore = torch.empty_like(ids_shuffle)
-        positions = torch.arange(L, device=device).expand(N, -1)
-        ids_restore.scatter_(1, ids_shuffle, positions)
+        # ids_restore = torch.empty_like(ids_shuffle)
+        # positions = torch.arange(L, device=device).expand(N, -1)
+        # ids_restore.scatter_(1, ids_shuffle, positions)
 
-        x_masked = torch.gather(
-            x,
-            dim=1,
-            index=ids_keep.unsqueeze(-1).expand(-1, -1, D),
-        )
+        # x_masked = torch.gather(
+        #     x,
+        #     dim=1,
+        #     index=ids_keep.unsqueeze(-1).expand(-1, -1, D),
+        # )
 
         # Write masked positions directly in original patch order.
         mask = torch.zeros(N, L, device=device)
@@ -574,7 +574,8 @@ class Vista(nn.Module):
         x = torch.empty(N, P, 1, device=device)                # only shape and device are used
 
         # ratio follows the strategy: rectangle / ellipse -> 0.75, random -> 0.90
-        type_to_ratio = {"rectangle": 0.75, "ellipse": 0.75, "random": 0.90}
+        # type_to_ratio = {"rectangle": 0.75, "ellipse": 0.75, "random": 0.90}
+        type_to_ratio = dict(zip(self.masking_types, self.mask_ratios))
 
         def ratio_of(mode):
             return mask_ratio if mask_ratio is not None else type_to_ratio[mode]

@@ -85,12 +85,14 @@ class CameraHead(nn.Module):
         self.fl_act = fl_act
         self.trunk_depth = trunk_depth
         self.global_feat = global_feat
+        
+        trunk_dim = dim_in // 2 if model_type == "vista" else dim_in          # Vista: 1536 -> 768
 
-        self.patch_pool = None if global_feat else PatchPool(dim_in)
+
+        self.patch_pool = nn.Identity() if global_feat else PatchPool(trunk_dim)
 
         # Vista: frame + global tokens are concatenated (2 * embed_dim); project them to embed_dim so the
         # trunk has the same size as the other models' camera heads. Everything after input_proj uses trunk_dim.
-        trunk_dim = dim_in // 2 if model_type == "vista" else dim_in          # Vista: 1536 -> 768
         self.input_proj = nn.Linear(dim_in, trunk_dim) if model_type == "vista" else nn.Identity()
 
         # Build the trunk using a sequence of transformer blocks.
@@ -102,7 +104,7 @@ class CameraHead(nn.Module):
         )
 
         # Normalizations for camera token (before the projection) and trunk output.
-        self.token_norm = nn.LayerNorm(dim_in)
+        self.token_norm = nn.LayerNorm(trunk_dim)
         self.trunk_norm = nn.LayerNorm(trunk_dim)
 
         # Learnable empty camera pose token.
@@ -116,31 +118,60 @@ class CameraHead(nn.Module):
         self.adaln_norm = nn.LayerNorm(trunk_dim, elementwise_affine=False, eps=1e-6)
         self.pose_branch = Mlp(in_features=trunk_dim, hidden_features=trunk_dim // 2, out_features=self.target_dim, drop=0)
 
-    def forward(self, aggregated_tokens_list: list, patch_start_idx: int = 0,  num_iterations: int = 4) -> list:
+    def forward(self, aggregated_tokens_list: list, patch_start_idx: int = 0, num_iterations: int = 4) -> list:
         """
         Forward pass to predict camera parameters.
 
         Args:
             aggregated_tokens_list (list): List of token tensors from the network;
                 the last tensor is used for prediction.
+            patch_start_idx (int): index of the first patch token (used when global_feat=False).
             num_iterations (int, optional): Number of iterative refinement steps. Defaults to 4.
 
         Returns:
             list: A list of predicted camera encodings (post-activation) from each iteration.
         """
         # Use tokens from the last block for camera prediction.
-        tokens = aggregated_tokens_list[-1]
+        tokens = aggregated_tokens_list[-1]                                          # (B, S, N, dim_in)
 
-        # Extract the camera tokens
+        # Extract the camera tokens (special tokens never enter the projection in the patch path).
         if self.global_feat:
-            pose_tokens = tokens[:, :, 0]
+            pose_tokens = self.input_proj(tokens[:, :, 0])                           # (B, S, dim) 
         else:
-            pose_tokens =  self.patch_pool(tokens[:, :, patch_start_idx:, :])
-        
-        pose_tokens = self.input_proj(self.token_norm(pose_tokens))       # Vista: (B, S, 1536) -> (B, S, 768)
+            patch_tokens = self.input_proj(tokens[:, :, patch_start_idx:, :])        # Vista: 1536 -> 768; others: identity
+            pose_tokens = self.patch_pool(patch_tokens)                              # (B, S, dim)
+
+        pose_tokens = self.token_norm(pose_tokens)                                   # norm AFTER pooling (as before)
 
         pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations)
         return pred_pose_enc_list
+
+
+    # def forward(self, aggregated_tokens_list: list, patch_start_idx: int = 0,  num_iterations: int = 4) -> list:
+    #     """
+    #     Forward pass to predict camera parameters.
+
+    #     Args:
+    #         aggregated_tokens_list (list): List of token tensors from the network;
+    #             the last tensor is used for prediction.
+    #         num_iterations (int, optional): Number of iterative refinement steps. Defaults to 4.
+
+    #     Returns:
+    #         list: A list of predicted camera encodings (post-activation) from each iteration.
+    #     """
+    #     # Use tokens from the last block for camera prediction.
+    #     tokens = aggregated_tokens_list[-1]
+
+    #     # Extract the camera tokens
+    #     if self.global_feat:
+    #         pose_tokens = tokens[:, :, 0]
+    #     else:
+    #         pose_tokens =  self.patch_pool(tokens[:, :, patch_start_idx:, :])
+        
+    #     pose_tokens = self.input_proj(self.token_norm(pose_tokens))       # Vista: (B, S, 1536) -> (B, S, 768)
+
+    #     pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations)
+    #     return pred_pose_enc_list
 
     def trunk_fn(self, pose_tokens: torch.Tensor, num_iterations: int) -> list:
         """

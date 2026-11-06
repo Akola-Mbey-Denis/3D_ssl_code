@@ -28,7 +28,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 # Project imports
 from datasets import get_data_loader  # noqa: E402
-from models import vista_base, vista_large
+from models import vista_base, vista_large, vista_v2_base, vista_v2_large
 
 
 import utils.misc as misc  # noqa: E402

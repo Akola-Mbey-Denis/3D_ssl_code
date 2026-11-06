@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from poincar3.heads.rotation import mat_to_quat
+from models.poincar3.heads.rotation import mat_to_quat
 
 from .datasets.annotations import RelposeAnnotationDataset, load_images, load_images_aspect_preserving
 from .inference import ReconModel

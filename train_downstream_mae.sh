@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GPU_TYPE="h200"
+GPU_TYPE="b200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
 EPOCHS=70
@@ -123,4 +123,4 @@ sbatch \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/mae_base_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/mae_base_patch_tokens_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep/\""

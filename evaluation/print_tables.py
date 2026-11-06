@@ -13,6 +13,8 @@ Examples
 
   # choose metrics per task (any key listed by --list_metrics)
   python print_tables.py results.pkl --metrics "depth=abs_rel,delta1;camera=auc30,auc5,rra15"
+  # camera metrics: rra/rta @ 5, 15, 20, 30 and auc @ 3, 5, 15, 20, 30 (records made before the
+  # extra thresholds show '--' until `eval_ssl.py --recompute`)
 
   # quick look in the terminal
   python print_tables.py results.pkl --markdown
@@ -64,12 +66,10 @@ CATALOG = {
         "delta3": M("delta3", r"$\delta_3\!\uparrow$", "max", 100, "{:.1f}", "δ3↑"),
     },
     "camera": {
-        "rra15": M("rra15", r"RRA@15$\uparrow$", "max", 100, "{:.1f}", "RRA@15↑"),
-        "rta15": M("rta15", r"RTA@15$\uparrow$", "max", 100, "{:.1f}", "RTA@15↑"),
-        "auc30": M("auc30", r"AUC@30$\uparrow$", "max", 100, "{:.1f}", "AUC@30↑"),
-        "auc15": M("auc15", r"AUC@15$\uparrow$", "max", 100, "{:.1f}", "AUC@15↑"),
-        "auc5": M("auc5", r"AUC@5$\uparrow$", "max", 100, "{:.1f}", "AUC@5↑"),
-        "auc3": M("auc3", r"AUC@3$\uparrow$", "max", 100, "{:.1f}", "AUC@3↑"),
+        **{f"{m.lower()}{t}": M(f"{m.lower()}{t}", rf"{m}@{t}$\uparrow$", "max", 100, "{:.1f}", f"{m}@{t}↑")
+           for t in (5, 15, 20, 30) for m in ("RRA", "RTA")},
+        **{f"auc{t}": M(f"auc{t}", rf"AUC@{t}$\uparrow$", "max", 100, "{:.1f}", f"AUC@{t}↑")
+           for t in (30, 20, 15, 5, 3)},
         "maa30": M("maa30", r"mAA@30$\uparrow$", "max", 100, "{:.1f}", "mAA30↑"),
     },
     "pointmap": {
@@ -82,9 +82,12 @@ CATALOG = {
         "comp_ratio": M("comp_ratio", r"CR$\uparrow$", "max", 100, "{:.1f}", "CR↑"),
     },
 }
+
+
 DEFAULT_METRICS = {
     "depth": ["abs_rel", "delta1"],
-    "camera": ["rra15", "rta15", "auc30"],
+    "camera": ["rra5", "rta5", "rra15", "rta15", "rra20", "rta20", "rra30", "rta30",
+               "auc3", "auc5", "auc15", "auc20", "auc30"],
     "pointmap": ["acc", "comp", "nc"],
 }
 TASK_TITLE = {"depth": "Depth", "camera": "Camera pose", "pointmap": "Point map"}

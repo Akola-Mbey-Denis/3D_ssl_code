@@ -47,7 +47,7 @@ class MAE(nn.Module):
         decoder_num_heads: int = 16,
         intermediate_layer_idx: Optional[Sequence[int]] = None,   # encoder blocks fed to the DPT head
         enable_camera: bool = True,
-        camera_global_feat: bool = True,        # True: cls token per view; False: pooled patch tokens
+        camera_global_feat: bool = False,        # True: cls token per view; False: pooled patch tokens
     ):
         super().__init__()
         self.img_size = img_size

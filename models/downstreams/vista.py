@@ -1,4 +1,4 @@
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 import torch
 from torch import nn
@@ -13,6 +13,13 @@ def even_layers(depth: int, n: int = 4):
     return [int(round(i * (depth - 1) / (n - 1))) for i in range(n)]
 
 
+# DPT widths per backbone width (standard DPT settings)
+DPT_OUT_CHANNELS = {
+    768: [96, 192, 384, 768],          # ViT-B
+    1024: [256, 512, 1024, 1024],      # ViT-L
+}
+
+
 class Vista(nn.Module):
     """Encoder + DPT depth head (+ optional camera head)."""
 
@@ -20,10 +27,12 @@ class Vista(nn.Module):
         self,
         img_size: int = 224,
         in_channels: int = 3,
-        output_channels: int = 2,               # depth + confidence
+        output_channels: int = 2,                                  # depth + confidence
         embed_dim: int = 768,
         encoder_depth: int = 6,
         encoder_num_heads: int = 12,
+        features: int = 128,                                       # DPT fusion width
+        out_channels: Optional[List[int]] = None,                  # DPT reassemble widths (None: from embed_dim)
         patch_start_idx: int = 1,
         patch_size: int = 16,
         n_storage_tokens: int = 0,
@@ -44,6 +53,12 @@ class Vista(nn.Module):
         assert max(intermediate_layer_idx) < encoder_depth, \
             f"{intermediate_layer_idx} out of range for encoder_depth={encoder_depth}"
 
+        if out_channels is None:
+            assert embed_dim in DPT_OUT_CHANNELS, \
+                f"no default DPT out_channels for embed_dim={embed_dim}; pass out_channels explicitly"
+            out_channels = DPT_OUT_CHANNELS[embed_dim]
+        assert len(out_channels) == 4, f"out_channels needs 4 entries, got {out_channels}"
+
         self.encoder = Encoder(
             img_size=img_size,
             patch_size=patch_size,
@@ -55,29 +70,33 @@ class Vista(nn.Module):
         )
 
         self.dpt_head = DPTHead(
-            dim_in=2 * embed_dim,
+            dim_in=2 * embed_dim,                                  # concat[frame, global]
             output_dim=output_channels,
             patch_size=patch_size,
             activation="exp",
             conf_activation="expp1",
+            features=features,
+            out_channels=list(out_channels),
             intermediate_layer_idx=list(intermediate_layer_idx),
         )
 
-        self.camera_head = CameraHead(dim_in=2 * embed_dim, global_feat = True, model_type = "vista") if enable_camera else None
+        self.camera_head = CameraHead(dim_in = 2 * embed_dim, global_feat=False, model_type="vista") \
+            if enable_camera else None
 
     def forward(self, images, return_intermediate_outputs: bool = True):
 
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
-           aggregated_tokens_list, patch_start_idx = self.encoder(images=images,return_intermediate_outputs=return_intermediate_outputs)
-        
+            aggregated_tokens_list, patch_start_idx = self.encoder(
+                images=images, return_intermediate_outputs=return_intermediate_outputs)
+
         aggregated_tokens_list = [t.float() for t in aggregated_tokens_list]
-       
+
         predictions = {}
 
         with torch.autocast(device_type="cuda", enabled=False):
             if self.camera_head is not None:
-                pose_enc_list = self.camera_head(aggregated_tokens_list)
+                pose_enc_list = self.camera_head(aggregated_tokens_list, patch_start_idx=self.patch_start_idx)
                 predictions["pose_enc"] = pose_enc_list[-1]          # last refinement iteration
                 predictions["pose_enc_list"] = pose_enc_list
 
@@ -92,13 +111,15 @@ class Vista(nn.Module):
         return predictions
 
 
-
-
 VISTA_CONFIGS = {
-    # your current defaults
-    "base": dict(embed_dim=768, encoder_depth=6, encoder_num_heads=12, intermediate_layer_idx=[0, 2, 3, 5]),
-    # wider (ViT-L width / heads) and twice as deep
-    "large": dict(embed_dim=1024, encoder_depth=12, encoder_num_heads=16, intermediate_layer_idx=[2, 5, 8, 11]),
+    # ViT-B width: 768-d, 6 blocks
+    "base": dict(embed_dim=768, encoder_depth=6, encoder_num_heads=12,
+                 features=128, out_channels=[96, 192, 384, 768],
+                 intermediate_layer_idx=[0, 2, 3, 5]),
+    # ViT-L width (DINO-L hidden dim 1024), 12 blocks
+    "large": dict(embed_dim=1024, encoder_depth=12, encoder_num_heads=16,
+                  features=256, out_channels=[256, 512, 1024, 1024],
+                  intermediate_layer_idx=[2, 5, 8, 11]),
 }
 
 
@@ -107,10 +128,10 @@ def _vista(size: str, **kwargs) -> Vista:
 
 
 def vista_base(**kwargs) -> Vista:
-    """768-d, 6 encoder blocks, 12 heads; DPT reads blocks 0, 2, 3, 5."""
+    """768-d, 6 encoder blocks, 12 heads; DPT reads blocks 0, 2, 3, 5 (features 128, out [96, 192, 384, 768])."""
     return _vista("base", **kwargs)
 
 
 def vista_large(**kwargs) -> Vista:
-    """1024-d, 12 encoder blocks, 16 heads; DPT reads blocks 0, 4, 7, 11."""
+    """1024-d, 12 encoder blocks, 16 heads; DPT reads blocks 2, 5, 8, 11 (features 256, out [256, 512, 1024, 1024])."""
     return _vista("large", **kwargs)

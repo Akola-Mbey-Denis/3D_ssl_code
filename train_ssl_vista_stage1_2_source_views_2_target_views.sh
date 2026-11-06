@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GPU_TYPE="h200"
+GPU_TYPE="b200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
 
@@ -85,7 +85,7 @@ echo "GRES = $GRES"
 # ---------------------------
 
 sbatch \
-  --account=torch_pr_41_tandon_advanced \
+  --account=torch_pr_41_courant \
   --time=36:00:00 \
   --mem=${MEMORY}G \
   --gres=${GRES} \

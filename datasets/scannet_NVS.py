@@ -363,7 +363,7 @@ class ScanNet_NVS(BaseDataset):
         for view in sequence_views:
             if self.load_depth:
                 depth_map = threshold_depth_map(view["depth"], min_percentile=-1, max_percentile=98)
-                mask = view["mask"].astype(np.int32)
+                mask = (depth_map > 0.00).astype(np.int32)
             else:
                 H, W = view["image"].shape[:2]
                 depth_map = np.zeros((H, W), np.float32)

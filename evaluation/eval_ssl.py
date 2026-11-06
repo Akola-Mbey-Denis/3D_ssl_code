@@ -4,7 +4,7 @@ Evaluate SSL backbones (with fine-tuned depth + camera heads) on multi-view data
 
 Tasks
   depth     : Pi^3 / CUT3R depth_evaluation (AbsRel, SqRel, RMSE, LogRMSE, delta1/2/3)
-  camera    : Poincar3 relpose metrics (AUC@{3,5,15,30}, RRA@15, RTA@15, mAA30), mean over scenes
+  camera    : Poincar3 relpose metrics (AUC@{3,5,15,20,30}, RRA / RTA @{5,15,20,30}, mAA30), mean over scenes
   pointmap  : Pi3 eval/mv_recon (umeyama Sim(3) + Open3D ICP, Open3D normals, Acc/Comp/NC in GT units, all points)
 
 Outputs (all under --results_dir)
@@ -22,6 +22,10 @@ Usage
   python eval_ssl.py --model vista_base_downstream --model_name vista --ckpt <vista_run_folder> \
       --dataset "Hypersim_NVS(...)+ScanNet_NVS(...)" --results_dir results/ssl_eval
   python eval_ssl.py --model mum_base_downstream --model_name mum_v2 --ckpt <mum_v2_run_folder> ...
+  # Poincar3 (experiments/ffrecon checkpoint; architecture comes from the checkpoint itself)
+  python eval_ssl.py --model poincar3 --model_name poincar3 --ckpt /path/to/ffrecon_run/checkpoint.pth ...
+  #   --model_kwargs '{"use_ema": false}'  raw weights instead of EMA
+  #   --model_kwargs '{"run_path": "..."}' adapter checkpoints: moved backbone pretraining run
 
   python eval_ssl.py --show --results_dir results/ssl_eval          # what is stored
   python print_tables.py results/ssl_eval/results.pkl --models mae mum mum_v2 muskie muskie_v2 vista
@@ -30,7 +34,8 @@ Usage
 LaTeX preamble needs:  \\usepackage{booktabs} \\usepackage{graphicx}
 
 The two places you may need to adapt to your code:
-  * run_model()     -> how your model is called and what keys it returns
+  * load_model() / run_model() -> how your model is built / called and what keys it returns
+    (Poincar3: poincar3_recon.load_recon_checkpoint; its forward returns the VGGT-style keys run_model reads)
   * gather_views()  -> batch key names (GT *_extrinsics are world-to-camera)
 """
 
@@ -60,10 +65,13 @@ from models import (  # noqa: E402,F401  (used through eval(args.model))
     mum_base_downstream, mum_large_downstream,
     muskie_base_downstream, muskie_large_downstream,
     vista_base_downstream, vista_large_downstream,
+    vista_basev2_downstream
 )
 
-# --model can be any constructor imported above (used through eval(args.model))
-MODEL_NAMES = sorted(n for n in dir() if n.endswith("_downstream"))
+# --model: any constructor imported above (built through eval(args.model) + state dict), or a model that
+# loads itself from its checkpoint (CHECKPOINT_MODELS: architecture + weights both come from the file)
+CHECKPOINT_MODELS = {"poincar3"}
+MODEL_NAMES = sorted(n for n in dir() if n.endswith("_downstream")) + sorted(CHECKPOINT_MODELS)
 
 # all fine-tuned runs live in folders under this root; --ckpt <folder name> picks the final weights inside
 CKPT_ROOT = "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints"
@@ -77,7 +85,10 @@ DISPLAY_NAMES = {
     "muskie": "Muskie",
     "muskie_v2": "Muskie-v2",
     "vista": "Vista",
+    "vista_force": "Vista-Force",
+    "poincar3": "Poincar3",
 }
+
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger("eval_ssl")
@@ -94,7 +105,9 @@ AMP = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 def parse_args():
     p = argparse.ArgumentParser("SSL backbone evaluation: depth / camera / point map")
     # model
-    p.add_argument("--model", type=str, help="Constructor to build, e.g. vista_base_downstream, mum_large_downstream")
+    p.add_argument("--model", type=str,
+                   help="Constructor to build, e.g. vista_base_downstream, mum_large_downstream; or poincar3 "
+                        "(experiments/ffrecon checkpoint, end-to-end or adapter)")
     p.add_argument("--model_name", type=str,
                    help="Unique key in the results store, e.g. mum, mum_v2, vista (letters, digits, . _ + - only). "
                         "Default: the --ckpt run folder name")
@@ -103,7 +116,8 @@ def parse_args():
                         "else the key. print_tables.py --rename overrides it")
     p.add_argument("--description", type=str, default="",
                    help='Free-text note stored with the record, e.g. "official weights" / "retrained on our data"')
-    p.add_argument("--model_kwargs", type=str, default="{}", help="JSON dict of constructor kwargs")
+    p.add_argument("--model_kwargs", type=str, default="{}",
+                   help="JSON dict of constructor kwargs (poincar3: use_ema, run_path)")
     p.add_argument("--ckpt", type=str, default=None,
                    help="Run folder name under --ckpt_root (e.g. mum_v2_probe), a folder path, or a weights file. "
                         "For a folder, the final weights inside it are used (final/last file, else highest step)")
@@ -203,7 +217,16 @@ def ckpt_run_name(ckpt, root):
 
 
 def load_model(args, device):
-    model = eval(args.model)(**json.loads(args.model_kwargs))   # e.g. vista_base_downstream(**kwargs)
+    kwargs = json.loads(args.model_kwargs)
+    if args.model == "poincar3":                                # architecture + weights from the checkpoint
+        from models.poincar3.benchmarks.ffrecon.inference import load_recon_checkpoint
+        input_size = kwargs.pop("input_size", None)            # eval-script option, not a loader kwarg
+        model = load_recon_checkpoint(args.ckpt, **kwargs)      # use_ema / run_path from --model_kwargs
+        model.input_size = input_size                           # e.g. 256: resize inputs for Poincar3
+        logger.info(f"Loaded {type(model).__name__} from {args.ckpt} (kwargs {kwargs}, input_size {input_size})")
+        return model.eval()
+
+    model = eval(args.model)(**kwargs)                          # e.g. vista_base_downstream(**kwargs)
 
     if args.ckpt:
         ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
@@ -230,10 +253,39 @@ def run_model(model, images, amp_dtype):
         depth : (B, S, h, w) float
         w2c   : (B, S, 4, 4) predicted world-to-camera (first view = world) or None
         K     : (B, S, 3, 3) predicted intrinsics at (H, W) or None
-    Assumes VGGT-style outputs: 'depth' (B,S,H,W,1) and 'pose_enc' (B,S,9).
+    Our downstream models: VGGT-style outputs 'depth' (B,S,H,W[,1]) and 'pose_enc' (B,S,9),
+    or 'extrinsic' (B,S,3,4) w2c + 'intrinsic' (B,S,3,3).
+    Poincar3 ReconModel: infer() on one sequence at a time, returns a ReconPrediction.
     """
+    # ---------------------------------------------------------------
+    # Poincar3 ReconModel: infer() takes one sequence (N, 3, H, W)
+    # ---------------------------------------------------------------
+    if hasattr(model, "infer"):
+        B, S, _, H, W = images.shape
+        size = getattr(model, "input_size", None)
+        run_imgs = images
+        if size is not None and (H, W) != (size, size):
+            run_imgs = F.interpolate(images.flatten(0, 1), size=(size, size), mode="bilinear",
+                                     align_corners=False).reshape(B, S, 3, size, size)
+        rh, rw = run_imgs.shape[-2:]
+
+        depths, w2cs, Ks = [], [], []
+        with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
+            for b in range(B):
+                pred = model.infer(run_imgs[b].clamp(0, 1))
+                d = pred.depth.float()
+                if d.dim() == 4:                                # (S, h, w, 1) -> (S, h, w)
+                    d = d[..., 0]
+                depths.append(d)
+                w2cs.append(to_4x4(pred.extrinsics.float()))   # (S, 4, 4) cam-from-world (VGGT convention)
+                Ks.append(scale_K(pred.intrinsics.float(), (rh, rw), (H, W)))   # back to input resolution
+        return {"depth": torch.stack(depths), "w2c": torch.stack(w2cs), "K": torch.stack(Ks)}
+
+    # ---------------------------------------------------------------
+    # Our downstream models: forward returns a VGGT-style dict
+    # ---------------------------------------------------------------
     with torch.autocast("cuda", dtype=amp_dtype, enabled=amp_dtype != torch.float32):
-        out = model(images=images)
+        out = model(images)
     if isinstance(out, (tuple, list)):  # e.g. VGGT_Depth_vae returns (_, _, pred_dict)
         out = out[-1]
 
@@ -249,13 +301,10 @@ def run_model(model, images, amp_dtype):
         extri, intri = pose_encoding_to_extri_intri(out["pose_enc"].float(), image_size_hw=(H, W))
         res["w2c"] = to_4x4(extri.float())
         res["K"] = intri.float()
-    elif "extrinsic" in out:
+    elif "extrinsic" in out:                    # cameras decoded by the model itself
         res["w2c"] = to_4x4(out["extrinsic"].float())
-        res["K"] = out.get("intrinsic", None)
+        res["K"] = out["intrinsic"].float() if out.get("intrinsic") is not None else None
     return res
-
-
-
 # =============================================================================
 # Batch handling
 # =============================================================================
@@ -745,17 +794,22 @@ def calculate_auc_np(r_error: np.ndarray, t_error: np.ndarray, max_threshold: in
     return float(np.mean(np.cumsum(normalized_histogram))), normalized_histogram
 
 
-def calculate_rra_rta_maa(r_error: np.ndarray, t_error: np.ndarray) -> dict[str, float]:
-    """`RRA@15`/`RTA@15` (fraction of pairs under a 15-degree rotation/
-    translation error) and `mAA30` (mean of the pointwise-min
-    rotation/translation accuracy curves, thresholds 0-30 degrees)."""
+def calculate_rra_rta_maa(r_error: np.ndarray, t_error: np.ndarray,
+                          thresholds=(5, 15, 20, 30)) -> dict[str, float]:
+    """`RRA@tau`/`RTA@tau` (fraction of pairs under a tau-degree rotation/
+    translation error) for every tau in `thresholds`, and `mAA30` (mean of the pointwise-min
+    rotation/translation accuracy curves, thresholds 0-30 degrees).
+    (Poincar3 reports tau = 15 only; the other thresholds use the identical formula.)"""
     num_pairs = len(r_error)
     if num_pairs == 0:
-        return {"RRA@15": 0.0, "RTA@15": 0.0, "mAA30": 0.0}
+        out = {f"{m}@{t}": 0.0 for t in thresholds for m in ("RRA", "RTA")}
+        out["mAA30"] = 0.0
+        return out
 
-    tau = 15
-    rra_15 = float(np.mean(r_error < tau))
-    rta_15 = float(np.mean(t_error < tau))
+    out = {}
+    for tau in thresholds:
+        out[f"RRA@{tau}"] = float(np.mean(r_error < tau))
+        out[f"RTA@{tau}"] = float(np.mean(t_error < tau))
 
     max_threshold = 30
     bins = np.arange(max_threshold + 1)
@@ -763,15 +817,19 @@ def calculate_rra_rta_maa(r_error: np.ndarray, t_error: np.ndarray) -> dict[str,
     r_curve = np.cumsum(r_hist.astype(float) / num_pairs)
     t_hist, _ = np.histogram(t_error, bins=bins)
     t_curve = np.cumsum(t_hist.astype(float) / num_pairs)
-    maa_30 = float(np.mean(np.minimum(r_curve, t_curve)))
-
-    return {"RRA@15": rra_15, "RTA@15": rta_15, "mAA30": maa_30}
+    out["mAA30"] = float(np.mean(np.minimum(r_curve, t_curve)))
+    return out
 
 # --- end of Poincar3 code ------------------------------------------------------------------------
 
 
-POSE_KEYS = {"AUC@30": "auc30", "AUC@15": "auc15", "AUC@5": "auc5", "AUC@3": "auc3",
-             "RRA@15": "rra15", "RTA@15": "rta15", "mAA30": "maa30"}
+# thresholds (degrees) of the pose metrics
+AUC_THRESHOLDS = (30, 20, 15, 5, 3)          # AUC of the max(rot, trans) error curve up to tau
+RA_THRESHOLDS = (5, 15, 20, 30)              # RRA@tau / RTA@tau
+
+POSE_KEYS = {f"AUC@{t}": f"auc{t}" for t in AUC_THRESHOLDS}
+POSE_KEYS.update({f"{m}@{t}": f"{m.lower()}{t}" for t in RA_THRESHOLDS for m in ("RRA", "RTA")})
+POSE_KEYS["mAA30"] = "maa30"
 
 
 def batch_scene_names(batch, B):
@@ -787,7 +845,7 @@ def batch_scene_names(batch, B):
 
 def camera_metrics(pose_seqs, group):
     """Poincar3 relpose metrics. Each sequence: pairwise errors from (S,4,4) w2c poses. Errors are pooled
-    per scene, every scene gets AUC@{30,15,5,3} + RRA@15 / RTA@15 / mAA30, and the result is the
+    per scene, every scene gets AUC@{30,20,15,5,3} + RRA / RTA @{5,15,20,30} + mAA30, and the result is the
     mean across scenes."""
     scene_r, scene_t = defaultdict(list), defaultdict(list)
     for rec in pose_seqs:
@@ -801,8 +859,8 @@ def camera_metrics(pose_seqs, group):
     per_scene = []
     for scene in scene_r:
         r_errors, t_errors = np.concatenate(scene_r[scene]), np.concatenate(scene_t[scene])
-        m = {f"AUC@{t}": calculate_auc_np(r_errors, t_errors, max_threshold=t)[0] for t in (30, 15, 5, 3)}
-        m.update(calculate_rra_rta_maa(r_errors, t_errors))
+        m = {f"AUC@{t}": calculate_auc_np(r_errors, t_errors, max_threshold=t)[0] for t in AUC_THRESHOLDS}
+        m.update(calculate_rra_rta_maa(r_errors, t_errors, RA_THRESHOLDS))
         per_scene.append(m)
     if not per_scene:
         return {}
@@ -1071,7 +1129,7 @@ def summarize_raw(raw, settings):
 METRIC_RANGES = {
     "depth": {"abs_rel": (0, None), "sq_rel": (0, None), "rmse": (0, None), "log_rmse": (0, None),
               "delta1": (0, 1), "delta2": (0, 1), "delta3": (0, 1)},
-    "camera": {k: (0, 1) for k in ("auc30", "auc15", "auc5", "auc3", "rra15", "rta15", "maa30")},
+    "camera": {k: (0, 1) for k in POSE_KEYS.values()},
     "pointmap": {"acc": (0, None), "acc_med": (0, None), "comp": (0, None), "comp_med": (0, None),
                  "nc": (0, 1), "nc_med": (0, 1), "nc1": (0, 1), "nc1_med": (0, 1), "nc2": (0, 1),
                  "nc2_med": (0, 1)},
@@ -1258,7 +1316,11 @@ def log_record(rec):
     if "depth" in m:
         parts.append(f"AbsRel {m['depth']['abs_rel']:.4f} d1 {m['depth']['delta1']:.3f}")
     if "camera" in m:
-        parts.append(f"AUC@30 {m['camera']['auc30']:.3f} RRA@15 {m['camera']['rra15']:.3f}")
+        c = m["camera"]
+        ra = " ".join(f"{c.get(f'rra{t}', float('nan')):.3f}/{c.get(f'rta{t}', float('nan')):.3f}"
+                      for t in RA_THRESHOLDS)
+        parts.append(f"AUC@30 {c['auc30']:.3f} AUC@20 {c.get('auc20', float('nan')):.3f}  "
+                     f"RRA/RTA@{{{','.join(map(str, RA_THRESHOLDS))}}} {ra}")
     if "pointmap" in m:
         parts.append(f"Acc {m['pointmap']['acc']:.4f} Comp {m['pointmap']['comp']:.4f} NC {m['pointmap']['nc']:.3f}")
     logger.info(f"[{rec['model']} / {rec['dataset']}] {status}  " + "  |  ".join(parts))

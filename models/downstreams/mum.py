@@ -33,6 +33,7 @@ class MuM(nn.Module):
         encoder_num_heads: int = 12,
         patch_start_idx: int = 1,
         patch_size: int = 16,
+        n_ref_views : int = 0,
         n_storage_tokens: int = 0,
         intermediate_layer_idx: Optional[Sequence[int]] = None,   # encoder blocks fed to the DPT head
         enable_camera: bool = True,
@@ -55,6 +56,7 @@ class MuM(nn.Module):
             img_size=img_size,
             patch_size=patch_size,
             in_chans=in_channels,
+            n_ref_views =n_ref_views,
             embed_dim=embed_dim,
             depth=encoder_depth,
             num_heads=encoder_num_heads,
@@ -70,7 +72,7 @@ class MuM(nn.Module):
             intermediate_layer_idx=list(intermediate_layer_idx),
         )
 
-        self.camera_head = CameraHead(dim_in = embed_dim, global_feat = True, model_type = "mum") if enable_camera else None
+        self.camera_head = CameraHead(dim_in = embed_dim, global_feat = False, model_type = "mum") if enable_camera else None
 
     def forward(self, images, return_intermediate_outputs: bool = True):
 

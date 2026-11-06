@@ -26,7 +26,12 @@ the anchor + num_views - 1 good frames of the same scene, chosen by --sequence_m
            ranked by revealed = overlap[t, s] * occlusion[t, s] (the share of the source's surfaces that lie in t's
            view BEHIND t's visible surface = what the source sees of t's hidden geometry); the top num_views - 1
            are taken (ties / zero scores: random among the valid views, fixed seed), then the most overlapping
-           remaining frames if too few are valid. Anchors missing from the matrices fall back to the window rule.
+           remaining frames if too few are valid. ONLY the frames listed in the matrices (e.g. the <= 1000 frames
+           selected per scene) are read, checked and used -- as anchors and as sources; scenes without matrices are
+           dropped. The scene file entry may be [rgb paths], (rgb_paths, ...) or {"img_paths": [...], ...}.
+           --matrix_rank overlap: sources ranked by overlap[t, s] (ties: occlusion) instead of revealed.
+           --strict_overlap: anchors with fewer than num_views - 1 valid sources are DROPPED (no fallback), so every
+           sequence has num_views - 1 sources within [--min_overlap, --max_overlap].
            __meta__["sequence_info"]: [{overlap, occlusion, revealed: [per other view], fallback}, ...].
   window:  the old rule: random good frames within +-window of the anchor in the sorted frame list.
 Scenes with fewer than num_views good frames get no sequences.
@@ -569,34 +574,86 @@ def overlap_scene(job):
     return results
 
 
+def _matrix_frame_names(entry):
+    """Frame list of one scene from an overlap scene file entry. Accepts
+    [paths], (rgb_paths, depth_paths, ...), {"rgb": [...], "depth": [...], ...}."""
+    def looks_like_images(x):
+        return (isinstance(x, (list, tuple, np.ndarray)) and len(x) > 0
+                and isinstance(x[0], (str, bytes, os.PathLike))
+                and strip_image_ext(x[0]) != osp.basename(str(x[0])))     # has an image extension
+    if isinstance(entry, dict):
+        for k in ("img_paths", "rgb", "rgbs", "rgb_files", "rgb_paths", "images", "image", "img", "imgs", "frames"):
+            if k in entry:
+                return list(entry[k])
+        cands = [v for v in entry.values() if looks_like_images(v)]
+        if cands:
+            return list(cands[0])
+        raise ValueError(f"no frame list among keys {list(entry)}")
+    entry = list(entry)
+    if entry and isinstance(entry[0], (list, tuple, np.ndarray)):      # (rgb_list, depth_list, ...)
+        rgb = [v for v in entry if looks_like_images(v) and "depth" not in str(v[0]).lower()]
+        return list(rgb[0] if rgb else entry[0])
+    return entry
+
+
+def _matrix_stem(name):
+    """Matrix row name -> frame stem used in the LMDB (NRGBD: depth<i> -> img<i>)."""
+    stem = strip_image_ext(name)
+    m = re.fullmatch(r"depth(\d+)", stem)
+    return f"img{m.group(1)}" if m else stem
+
+
 def load_overlap_matrices(overlap_basedir, scene, scene_files):
-    """(frame stems of the rows, overlap [t, s], occlusion [t, s]) of a scene, or None if not available."""
+    """(frame stems of the rows, overlap [t, s], occlusion [t, s]) of a scene, or None if not available /
+    inconsistent (the scene then falls back to the window rule, with a warning)."""
     d = osp.join(overlap_basedir, scene)
     if not osp.exists(osp.join(d, "camera_overlap.npy")):
         return None
     overlap = np.load(osp.join(d, "camera_overlap.npy"))
     occlusion = np.load(osp.join(d, "camera_occlusion.npy"))
-    if osp.exists(osp.join(d, "frame_names.pkl")):
-        with open(osp.join(d, "frame_names.pkl"), "rb") as f:
-            names = pkl.load(f)
-    elif scene_files is not None and scene in scene_files:
-        names = [osp.basename(p) for p in scene_files[scene]]
-    else:
+    try:
+        if osp.exists(osp.join(d, "frame_names.pkl")):
+            with open(osp.join(d, "frame_names.pkl"), "rb") as f:
+                names = _matrix_frame_names(pkl.load(f))
+        elif scene_files is not None and scene in scene_files:
+            names = _matrix_frame_names(scene_files[scene])
+        else:
+            print(f"[matrix] {scene}: no frame_names.pkl and not in --overlap_scene_file -> window rule")
+            return None
+    except Exception as e:                                                  # noqa: BLE001
+        print(f"[matrix] {scene}: cannot read the frame list ({e}) -> window rule")
         return None
     if overlap.shape != (len(names), len(names)) or occlusion.shape != overlap.shape:
-        raise ValueError(f"{scene}: overlap {overlap.shape} / occlusion {occlusion.shape} vs {len(names)} frame names")
-    return [strip_image_ext(n) for n in names], overlap, occlusion
+        print(f"[matrix] {scene}: overlap {overlap.shape} / occlusion {occlusion.shape} vs {len(names)} frame "
+              f"names -> window rule")
+        return None
+    return [_matrix_stem(osp.basename(str(n))) for n in names], overlap, occlusion
+
+
+def load_scene_files(path):
+    if not path:
+        return None
+    with open(path, "rb") as f:
+        return pkl.load(f)
+
+
+def matrix_frame_sets(args, scenes):
+    """{scene: set of frame stems in the scene's overlap matrix (the selected frames)} or None for a scene
+    without usable matrices."""
+    scene_files = load_scene_files(args.overlap_scene_file)
+    out = {}
+    for scene in scenes:
+        m = load_overlap_matrices(args.overlap_basedir, scene, scene_files)
+        out[scene] = set(m[0]) if m is not None else None
+    return out
 
 
 def matrix_sequences(pools, anchors, args):
     """Sequences from precomputed overlap / occlusion matrices (see the module docstring, --sequence_mode matrix)."""
-    scene_files = None
-    if args.overlap_scene_file:
-        with open(args.overlap_scene_file, "rb") as f:
-            scene_files = pkl.load(f)
+    scene_files = load_scene_files(args.overlap_scene_file)
     V = args.num_views
     sequences, infos, cache = [], [], {}
-    n_no_matrix = n_anchor_missing = 0
+    n_no_matrix = n_anchor_missing = n_dropped = 0
     for gi, (scene, anchor) in enumerate(tqdm(anchors, desc=f"{args.dataset} [{args.split}] matrix sequences")):
         if scene not in cache:
             cache.clear()                                            # anchors come grouped by scene
@@ -616,6 +673,9 @@ def matrix_sequences(pools, anchors, args):
         if entry is None or entry[1][a] < 0:
             n_no_matrix += entry is None
             n_anchor_missing += entry is not None
+            if args.strict_overlap:
+                n_dropped += 1
+                continue
             sequences.append((scene, pick_views(pool, anchor, V, args.window, rng)))
             infos.append({"overlap": [], "occlusion": [], "revealed": [], "fallback": True, "no_matrix": True})
             continue
@@ -627,8 +687,15 @@ def matrix_sequences(pools, anchors, args):
         valid = in_m & (o >= args.min_overlap) & (o <= args.max_overlap)
         revealed = np.where(valid, o * c, -1.0)
 
-        cand = np.flatnonzero(valid & (revealed > 0))
-        cand = cand[np.lexsort((rng.random(len(cand)), -revealed[cand]))]       # best first, random ties
+        if args.strict_overlap and valid.sum() < V - 1:               # not enough well-overlapping sources: drop
+            n_dropped += 1
+            continue
+        if args.matrix_rank == "overlap":                            # highest overlap first, ties: occlusion
+            cand = np.flatnonzero(valid)
+            cand = cand[np.lexsort((rng.random(len(cand)), -c[cand], -o[cand]))]
+        else:                                                        # most revealed hidden geometry first
+            cand = np.flatnonzero(valid & (revealed > 0))
+            cand = cand[np.lexsort((rng.random(len(cand)), -revealed[cand]))]   # best first, random ties
         chosen = [int(j) for j in cand[:V - 1]]
         rest = [j for j in np.flatnonzero(valid) if j not in chosen]
         if len(chosen) < V - 1 and rest:
@@ -645,9 +712,13 @@ def matrix_sequences(pools, anchors, args):
         infos.append({"overlap": [float(o[j]) for j in others], "occlusion": [float(c[j]) for j in others],
                       "revealed": [float(max(revealed[j], 0.0)) for j in others], "fallback": bool(fallback),
                       "no_matrix": False})
-    if n_no_matrix or n_anchor_missing:
+    if (n_no_matrix or n_anchor_missing) and not args.strict_overlap:
         print(f"[{args.dataset} {args.split}] window-rule fallback: {n_no_matrix:,} anchors in scenes without "
               f"matrices, {n_anchor_missing:,} anchors missing from their scene's matrix")
+    if args.strict_overlap:
+        print(f"[{args.dataset} {args.split}] strict overlap: dropped {n_dropped:,} of {len(anchors):,} anchors "
+              f"without {V - 1} sources with {args.min_overlap:g} <= overlap <= {args.max_overlap:g}; "
+              f"kept {len(sequences):,}")
     return sequences, infos
 
 
@@ -683,6 +754,18 @@ def main(args):
                        if f.endswith(".npz") and not f.endswith(".tmp.npz")]
     if not frames:
         raise SystemExit(f"no LDIs for {args.dataset} [{args.split}] under {osp.join(args.dump_root, 'LDIs')}")
+
+    # matrix mode: ONLY the frames selected for the overlap matrices (anchors and sources)
+    if args.sequence_mode == "matrix":
+        selected = matrix_frame_sets(args, scenes)
+        n_before = len(frames)
+        frames = [(s, n) for s, n in frames if selected.get(s) is not None and n in selected[s]]
+        no_matrix = sorted(s for s, v in selected.items() if v is None)
+        print(f"[{args.dataset} {args.split}] matrix frames only: {len(frames):,} of {n_before:,} frames with an LDI"
+              + (f"; scenes without usable matrices dropped: {no_matrix}" if no_matrix else ""))
+        if not frames:
+            raise SystemExit("no frame of the split is in an overlap matrix -- check --overlap_basedir / "
+                             "--overlap_scene_file")
 
     out = args.out or osp.join(args.dump_root, "LDIs", f"{args.dataset}_{args.split}_ldi_seq{args.num_views}.lmdb")
     if args.overwrite and osp.exists(out):
@@ -749,17 +832,21 @@ def main(args):
     env.sync()
     env.close()
 
-    a = np.array([agreements[f] for f in frames])
+    a = np.array([agreements.get(f, -1.0) for f in frames])
     print(f"[{args.dataset} {args.split}] layer-1 agreement median {np.median(a):.0%}; good frames {len(good):,} of "
           f"{len(frames):,} ({len(good) / len(frames):.0%}); {len(sequences):,} sequences of {args.num_views} views "
           f"from {len(pools)} scenes; {osp.getsize(out) / 1024 ** 3:.2f} GB")
     if infos and args.sequence_mode == "matrix":
         rv = np.array([r for i in infos for r in i["revealed"]])
         ov = np.array([o for i in infos for o in i["overlap"]])
-        print(f"[{args.dataset} {args.split}] matrix sequences: per view overlap median {np.median(ov):.0%}, "
-              f"revealed (overlap x occlusion) median {np.median(rv):.3f}; "
-              f"{np.mean([i['fallback'] for i in infos]):.1%} sequences needed a fallback "
-              f"({np.mean([i['no_matrix'] for i in infos]):.1%} without a matrix)")
+        if len(ov):
+            print(f"[{args.dataset} {args.split}] matrix sequences: per view overlap median {np.median(ov):.0%}, "
+                  f"revealed (overlap x occlusion) median {np.median(rv):.3f}; "
+                  f"{np.mean([i['fallback'] for i in infos]):.1%} sequences needed a fallback "
+                  f"({np.mean([i['no_matrix'] for i in infos]):.1%} without a matrix row)")
+        else:
+            print(f"[{args.dataset} {args.split}] matrix sequences: NO anchor had a matrix row -- all "
+                  f"{len(infos):,} sequences use the window rule (check --overlap_basedir / --overlap_scene_file)")
     elif infos:
         cov = np.array([i["hidden_cov"] for i in infos if i["n_hidden"] > 0])
         ov = np.array([o for i in infos for o in i["overlap"]])
@@ -784,7 +871,12 @@ def get_args():
     p.add_argument("--overlap_basedir", default=None, help="matrix mode: <dir>/<scene>/camera_overlap.npy, ...")
     p.add_argument("--overlap_scene_file", default=None, help="matrix mode: {scene: [rgb paths]} the matrices "
                    "were computed from (used when a scene folder has no frame_names.pkl)")
-    p.add_argument("--window", type=int, default=30, help="window mode: views within +-window frames of the anchor")
+    p.add_argument("--matrix_rank", choices=["revealed", "overlap"], default="revealed",
+                   help="matrix mode: rank valid sources by overlap x occlusion (revealed) or by overlap")
+    p.add_argument("--strict_overlap", action="store_true",
+                   help="matrix mode: drop anchors without num_views - 1 sources in [min_overlap, max_overlap] "
+                        "(no fallback views)")
+    p.add_argument("--window", type=int, default=10, help="window mode: views within +-window frames of the anchor")
     p.add_argument("--min_overlap", type=float, default=0.1, help="overlap mode: min fraction of the anchor's "
                    "visible points seen by a view")
     p.add_argument("--max_overlap", type=float, default=0.9, help="overlap mode: max (drops near-duplicate views)")
@@ -804,4 +896,5 @@ def get_args():
 
 
 if __name__ == "__main__":
+    # os.umask(0o022)      
     main(get_args())

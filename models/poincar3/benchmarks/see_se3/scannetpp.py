@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 
-from poincar3.benchmarks.see_se3.scene import Scene
+from models.poincar3.benchmarks.see_se3.scene import Scene
 
 _SPLIT_FILES = {"train": "nvs_sem_train.txt", "val": "nvs_sem_val.txt", "test": "nvs_test.txt"}
 

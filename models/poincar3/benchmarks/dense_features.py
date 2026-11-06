@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from poincar3.model import Poincar3
+from models.poincar3.model import Poincar3
 
 
 @dataclass(frozen=True)

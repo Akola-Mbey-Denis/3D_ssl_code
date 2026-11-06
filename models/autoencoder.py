@@ -544,7 +544,241 @@ def slice_expand_and_flatten(
         *combined.shape[2:],
     )
 
+class EncoderV2(nn.Module):
+    """
+    Encoder for clean + masked views with alternating frame-level and global attention.
 
+    The first `num_clean` views are clean (A); the rest are masked (B). Masked
+    patches of B are replaced by a learned mask token after patch embedding.
+    A and B are processed jointly, and tokens of ALL views are returned.
+
+    mask=None -> all views clean (downstream / inference).
+    """
+
+    def __init__(
+        self,
+        img_size: int = 224,
+        patch_size: int = 14,
+        embed_dim: int = 1024,
+        depth: int = 24,
+        num_heads: int = 16,
+        mlp_ratio: float = 4.0,
+        n_storage_tokens: int = 0,
+        block_fn=Block,
+        in_chans: int = 3,
+        qkv_bias: bool = True,
+        proj_bias: bool = True,
+        aa_order: Tuple[str, ...] = ("frame", "global"),
+        aa_block_size: int = 1,
+        qk_norm: bool = True,
+        rope_freq: int = 100,
+        init_values: float = 0.01,
+        cached_layer_indices: Tuple[int, ...] = (3, 5, 7, 11),
+        use_reentrant: bool = False,
+        num_clean: int = 4,
+    ):
+        super().__init__()
+
+        if num_clean < 1:
+            raise ValueError(f"num_clean must be >= 1, got {num_clean}")
+
+        self.num_clean = num_clean
+        self.depth = depth
+        self.patch_size = patch_size
+        self.n_storage_tokens = n_storage_tokens
+        self.aa_order = aa_order
+        self.aa_block_size = aa_block_size
+        self.aa_block_num = depth // aa_block_size
+        self.use_reentrant = use_reentrant
+
+        # Patch embedding
+        self.patch_embed = PatchEmbed(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+        )
+
+        # Special tokens
+        self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim))
+        nn.init.normal_(self.cls_token, std=0.02)
+
+        if n_storage_tokens > 0:
+            self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim))
+            nn.init.normal_(self.storage_tokens, std=0.02)
+
+        self.patch_start_idx = 1 + n_storage_tokens
+
+        # Mask token for masked patches of B views
+        self.mask_token = nn.Parameter(torch.empty(1, 1, embed_dim))
+        nn.init.normal_(self.mask_token, std=0.02)
+
+        # RoPE
+        self.rope = RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 else None
+        self.position_getter = PositionGetter() if self.rope is not None else None
+
+        # Cached layers (always retain final layer)
+        self.cached_layer_indices = set(cached_layer_indices)
+        self.cached_layer_indices.add(depth - 1)
+
+        # Frame and global attention blocks
+        def make_blocks():
+            return nn.ModuleList(
+                [
+                    block_fn(
+                        dim=embed_dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        qkv_bias=qkv_bias,
+                        proj_bias=proj_bias,
+                        init_values=init_values,
+                        qk_norm=qk_norm,
+                        rope=self.rope,
+                    )
+                    for _ in range(depth)
+                ]
+            )
+
+        self.frame_blocks = make_blocks()
+        self.global_blocks = make_blocks()
+
+    # =============================================================
+    # Forward
+    # =============================================================
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        return_intermediate_outputs: bool = False,
+    ):
+        """
+        Args:
+            images: [B, S, 3, H, W], first `num_clean` views clean, rest masked.
+            mask:   [B, S - num_clean, N] bool, True = masked patch.
+                    None -> all views clean (downstream / inference).
+
+        Returns:
+            If return_intermediate_outputs=False:
+                tokens of all views [B, S, P, C], patch_start_idx
+            If return_intermediate_outputs=True:
+                list of [B, S, P, 2C], patch_start_idx
+        """
+        B, S, C_in, H, W = images.shape
+        if C_in != 3:
+            raise ValueError(f"Expected 3 input channels, got {C_in}")
+
+        num_clean = S if mask is None else self.num_clean
+        S_m = S - num_clean
+        if mask is not None and not 0 < num_clean < S:
+            raise ValueError(f"Got {S} views but num_clean={num_clean}; need at least one masked view")
+
+        # Patch embedding
+        x = self.patch_embed(images.reshape(B * S, C_in, H, W))  # [B*S, N, C]
+        _, N, C = x.shape
+
+        # Replace masked patches of B views with the mask token
+        if S_m > 0:
+            if mask.shape != (B, S_m, N):
+                raise ValueError(f"Expected mask of shape {(B, S_m, N)}, got {tuple(mask.shape)}")
+            x = x.view(B, S, N, C)
+            masked_views = torch.where(
+                mask.bool().unsqueeze(-1),
+                self.mask_token.to(x.dtype).expand(B, S_m, N, C),
+                x[:, num_clean:],
+            )
+            x = torch.cat([x[:, :num_clean], masked_views], dim=1).reshape(B * S, N, C)
+
+        # Special tokens
+        special = [self.cls_token.expand(B * S, -1, -1)]
+        if self.n_storage_tokens > 0:
+            special.append(self.storage_tokens.expand(B * S, -1, -1))
+        tokens = torch.cat(special + [x], dim=1)
+        _, P, C = tokens.shape
+
+        # RoPE positions (masked tokens keep their patch positions)
+        pos = None
+        if self.rope is not None:
+            pos = self.position_getter(
+                B * S, H // self.patch_size, W // self.patch_size, device=images.device
+            ) + 1
+            pos_special = torch.zeros(B * S, self.patch_start_idx, 2, device=images.device, dtype=pos.dtype)
+            pos = torch.cat([pos_special, pos], dim=1)
+
+        # Alternating attention over A and B jointly
+        frame_idx = 0
+        global_idx = 0
+        output_list = []
+
+        for _ in range(self.aa_block_num):
+            frame_intermediates, global_intermediates = [], []
+            for attn_type in self.aa_order:
+                if attn_type == "frame":
+                    tokens, frame_idx, frame_intermediates = self._process_frame_attention(
+                        tokens, B, S, P, C, frame_idx, pos=pos
+                    )
+                elif attn_type == "global":
+                    tokens, global_idx, global_intermediates = self._process_global_attention(
+                        tokens, B, S, P, C, global_idx, pos=pos
+                    )
+                else:
+                    raise ValueError(f"Unknown attention type: {attn_type}")
+
+            if return_intermediate_outputs:
+                for i in range(len(frame_intermediates)):
+                    output_list.append(
+                        torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
+                    )
+
+        if return_intermediate_outputs:
+            return output_list, self.patch_start_idx
+
+        return tokens.view(B, S, P, C), self.patch_start_idx
+
+    # =============================================================
+    # Frame attention: [B*S, P, C]
+    # =============================================================
+
+    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
+        if tokens.shape != (B * S, P, C):
+            tokens = tokens.reshape(B * S, P, C)
+        if pos is not None and pos.shape != (B * S, P, 2):
+            pos = pos.reshape(B * S, P, 2)
+
+        intermediates = []
+        for _ in range(self.aa_block_size):
+            block = self.frame_blocks[frame_idx]
+            if self.training:
+                tokens = checkpoint(block, tokens, pos, use_reentrant=self.use_reentrant)
+            else:
+                tokens = block(tokens, pos=pos)
+            frame_idx += 1
+            intermediates.append(tokens.reshape(B, S, P, C))
+
+        return tokens, frame_idx, intermediates
+
+    # =============================================================
+    # Global attention: [B, S*P, C]
+    # =============================================================
+
+    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None):
+        if tokens.shape != (B, S * P, C):
+            tokens = tokens.reshape(B, S * P, C)
+        if pos is not None and pos.shape != (B, S * P, 2):
+            pos = pos.reshape(B, S * P, 2)
+
+        intermediates = []
+        for _ in range(self.aa_block_size):
+            block = self.global_blocks[global_idx]
+            if self.training:
+                tokens = checkpoint(block, tokens, pos, use_reentrant=self.use_reentrant)
+            else:
+                tokens = block(tokens, pos=pos)
+            global_idx += 1
+            intermediates.append(tokens.reshape(B, S, P, C))
+
+        return tokens, global_idx, intermediates
+        
 
 class Decoder(nn.Module):
     """

@@ -5,13 +5,13 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from poincar3.device import device
-from poincar3.heads.camera_head import CameraHead
-from poincar3.heads.dense_head import DenseHead
-from poincar3.heads.mv_adapter import MultiViewAdapter
-from poincar3.heads.mv_adapter import dense_head_hook_indices as _adapter_hook_indices
-from poincar3.heads.pose_enc import pose_encoding_to_extri_intri
-from poincar3.model import Poincar3
+from models.poincar3.device import device
+from models.poincar3.heads.camera_head import CameraHead
+from models.poincar3.heads.dense_head import DenseHead
+from models.poincar3.heads.mv_adapter import MultiViewAdapter
+from models.poincar3.heads.mv_adapter import dense_head_hook_indices as _adapter_hook_indices
+from models.poincar3.heads.pose_enc import pose_encoding_to_extri_intri
+from models.poincar3.model import Poincar3
 
 
 class ReconPrediction:
@@ -147,7 +147,7 @@ def load_recon_checkpoint(
         return ckpt[ema_key] if use_ema and ema_key in ckpt else ckpt[key]
 
     if "adapter" in ckpt:
-        from poincar3.baselines import load_backbone
+        from models.poincar3.baselines import load_backbone
 
         backbone, _ = load_backbone(ckpt["backbone"], run_path or ckpt.get("run_path"))
         backbone.eval()

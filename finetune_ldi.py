@@ -8,12 +8,15 @@ only loss is LayeredDepthLoss on every view:
     batch["ldis_mask"]  (B, S, L, H, W)  or (B, L, H, W)   True where layer k exists (optional: else ldis > 0)
     batch["depths"]     (B, S, H, W)     or (B, H, W)      GT depth (optional; only shown in TensorBoard, no loss)
 
-The model must return layered_depth / layered_depth_conf / layered_depth_exist (B, S, N, H, W)
+The model must return layered_depth  / layered_depth_stop (B, S, N+1, H, W)
 (e.g. mae_base_ldi). The loss config needs a `layered_depth` entry under `loss`
 (LayeredDepthLoss options; {} = defaults).
 
-    --model      factory string, e.g. "mum_base_downstream()" (evaled)
-    --ckpt_path  SSL run folder; encoder.* weights are loaded from <ckpt_path>/checkpoint-best.pth
+    --model      factory string, e.g. "mum_base_ldi()" or "poincar3_ldi(num_layers=4)" (evaled)
+    --ckpt_path  MAE / MuM / Muskie / Vista: SSL run folder; encoder.* weights are loaded from
+                 <ckpt_path>/checkpoint-final.pth
+                 Poincar3: optional. Unset -> released checkpoint (auto-download); set -> a Poincar3
+                 pretraining run directory (cfg.pkl + weights.pth)
     encoder      model.encoder is always frozen (no grads, eval mode); only the heads are trained
     resume       automatic from <output_dir>/checkpoint-last.pth
     batch        source + target views are concatenated along the view axis (dim 1)
@@ -48,8 +51,11 @@ from models import LayeredDepthLoss  # noqa: E402,F401
 from models import (  # noqa: E402,F401  (used through eval(args.model))
     mae_base_ldi, mum_base_ldi, vista_base_ldi, muskie_base_ldi
 )
+from models.downstreams.poincar3_ldi import (  # noqa: E402,F401  (used through eval(args.model))
+    Poincar3_LDI, poincar3_ldi, poincar3_large_ldi
+)
 import utils.misc as misc  # noqa: E402
-from utils.inference import vis_depth_maps  # noqa: E402
+from utils.inference import vis_depth_maps, vis_layered_depth_maps  # noqa: E402
 
 logger = logging.getLogger("finetune")
 logging.basicConfig(level=logging.INFO)
@@ -75,7 +81,9 @@ def get_args_parser():
 
     # model
     parser.add_argument("--model", default="mae_base_ldi(num_layers=4)", type=str, help="model constructor string (evaled)")
-    parser.add_argument("--ckpt_path", type=str, required = True,  help="SSL pretraining run folder (encoder weights, frozen)")
+    parser.add_argument("--ckpt_path", type=str, default=None,
+                        help="SSL pretraining run folder (encoder weights, frozen). Required for MAE / MuM / "
+                             "Muskie / Vista; optional for Poincar3 (unset = released checkpoint)")
     parser.add_argument("--warmup", default=False, type=str2bool, help="(unused, kept for launch scripts)")
 
     # data
@@ -133,6 +141,7 @@ def move_selected_keys_to_device(batch: dict, keys, device="cuda"):
         batch[key] = tensor.float()              # dtype conversion on the GPU (no-op if already float32)
     return batch
 
+
 def prepare_batch(batch: dict, device) -> dict:
     """images (B, S, 3, H, W), GT LDI (B, S, L, H, W) and its mask, GT depth (B, S, H, W) if present (masked,
     for visualisation only); a single view per sample gets S = 1."""
@@ -156,11 +165,12 @@ def prepare_batch(batch: dict, device) -> dict:
         out["depth"] = depth * (depth_mask & (depth > 0))
     return out
 
+
 def forward_and_loss(model, criterion, inputs: dict):
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     with torch.amp.autocast(device_type="cuda", dtype=dtype):
         predictions = model(inputs["images"])
-    for key in ("layered_depth", "layered_depth_exist"):
+    for key in ("layered_depth", "layered_depth_stop"):
         if key not in predictions:
             raise KeyError(f"model returned no '{key}': build it with a LayeredDPTHead")
 
@@ -173,16 +183,11 @@ def forward_and_loss(model, criterion, inputs: dict):
     return predictions, loss_dict
 
 
-
-# def to_scalars(loss_dict: dict) -> dict:
-#     """Loss terms other than 'objective', as python floats."""
-#     return {k: float(v.mean()) if torch.is_tensor(v) else float(v)
-#             for k, v in loss_dict.items() if k != "objective"}
-
 def to_scalars(loss_dict: dict) -> dict:
     """Loss terms other than 'objective', as python floats."""
     return {k: float(v.detach().mean()) if torch.is_tensor(v) else float(v)
             for k, v in loss_dict.items() if k != "objective"}
+
 
 def count_parameters(module: torch.nn.Module, trainable_only: bool = True) -> int:
     return sum(p.numel() for p in module.parameters() if p.requires_grad or not trainable_only)
@@ -225,6 +230,31 @@ def freeze_encoder(model):
     model.encoder.requires_grad_(False)
     model.encoder.eval()
     assert not any(p.requires_grad for p in model.encoder.parameters())
+
+
+def is_poincar3(model) -> bool:
+    return isinstance(model, Poincar3_LDI)
+
+
+def setup_encoder(model, ckpt_path):
+    """Load the pretrained backbone into model.encoder and freeze it.
+
+    Poincar3: the backbone is built by the model itself (Poincar3_LDI.__init__ / load_pretrained), so
+        load_encoder is skipped. ckpt_path=None keeps the released checkpoint; a ckpt_path must be a Poincar3
+        pretraining run directory, and must match the run_path given in --model (if any).
+    Others: encoder.* weights from <ckpt_path>/checkpoint-final.pth (ckpt_path required).
+    """
+    if is_poincar3(model):
+        if ckpt_path is not None:
+            model.load_pretrained(ckpt_path)          # no-op if already built from this run, error if it conflicts
+        logger.info("Poincar3 backbone: %s", model.run_path or "released checkpoint")
+    else:
+        if ckpt_path is None:
+            raise ValueError(f"--ckpt_path is required for {type(model).__name__} (SSL run folder)")
+        load_encoder(model, ckpt_path)
+
+    freeze_encoder(model)                             # always frozen; only the heads are trained
+    return model
 
 
 # ======================================================================
@@ -304,6 +334,7 @@ def test_one_epoch(model, criterion, data_loader: Sized, device, epoch: int, arg
 
             # first view of the first samples: RGB input, GT depth, GT / predicted layers (n_vis, N, H, W)
             n_vis = min(2, inputs["ldi"].shape[0])
+
             N = predictions["layered_depth"].shape[2]
             rgb = inputs["images"][:n_vis, 0].float().clamp(0, 1)                     # (n_vis, 3, H, W) in [0, 1]
             gt_ldi = inputs["ldi"][:n_vis, 0, :N] * inputs["ldi_masks"][:n_vis, 0, :N]
@@ -383,11 +414,9 @@ def train_one_epoch(model, criterion, loss_scaler, data_loader: Sized, optimizer
 
         terms = to_scalars(loss_dict)
         lr = optimizer.param_groups[0]["lr"]
-        # metric_logger.update(epoch=epoch_f, lr=lr, loss=float(total_loss), **terms)
         metric_logger.update(epoch=epoch_f, lr=lr, loss=float(total_loss.detach()), **terms)
 
         if update_grads and (step + 1) % (accum_iter * args.print_freq) == 0:
-            # loss_reduced = misc.all_reduce_mean(float(total_loss))      # must run on all ranks
             loss_reduced = misc.all_reduce_mean(total_loss.detach())    # must run on all ranks
             if log_writer is not None:
                 step_1000x = int(epoch_f * 1000)
@@ -444,11 +473,7 @@ def train(args):
     # ---------------- model ----------------
     logger.info("Instantiating model: %s", args.model)
     model = eval(args.model)
-    if args.ckpt_path is not None:
-        load_encoder(model, args.ckpt_path)
-    else:
-        logger.warning("No --ckpt_path: the encoder stays frozen at its random / factory initialisation")
-    freeze_encoder(model)                     # always frozen; only the heads are trained
+    setup_encoder(model, args.ckpt_path)      # load the pretrained backbone (per model type) + freeze it
     model.to(device)
     logger.info("Parameters: %s total, %s trainable",
                 f"{count_parameters(model, False):,}", f"{count_parameters(model):,}")

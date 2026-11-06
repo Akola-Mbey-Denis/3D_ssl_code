@@ -1,6 +1,6 @@
 from tqdm import tqdm
 from .utils import to_cuda, MetricLogger
-from poincar3.benchmarks import matchbench
+from models.poincar3.benchmarks import matchbench
 import torch
 
 def log_param_statistics(named_parameters, norm_type = 2):
