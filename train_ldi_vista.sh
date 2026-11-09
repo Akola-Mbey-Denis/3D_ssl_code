@@ -127,7 +127,7 @@ sbatch \
           --train_dataset=\"ScannetPP_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml') + 5_000 @ Matterport3D_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + 10_000 @ ARKitScenes_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml') + 30_000 @ ScanNet_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml')\" \
           --test_dataset=\"ScannetPP_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml') + ScanNet_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml') + Matterport3D_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_ldi.yaml') + ARKitScenes_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_ldi.yaml')\" \
           --model=\"vista_base_ldi(num_layers=4)\" \
-          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
+          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_v2_full_loss_b_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
           --lr=2e-4 \
           --epochs=${EPOCHS} \
           --batch_size=${BATCH_SIZE} \
@@ -136,4 +136,4 @@ sbatch \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_all_matterport5k_arkitscenes10k_scannet10k_model_224_x_224_${EPOCHS}ep/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav2_full_loss_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_all_matterport5k_arkitscenes10k_scannet10k_model_224_x_224_${EPOCHS}ep/\""

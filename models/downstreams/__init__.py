@@ -13,6 +13,9 @@ from .vistav2 import vista_large_v2 as vista_largev2_downstream
 from .muskie import muskie_base as muskie_base_downstream
 from .muskie import muskie_large as muskie_large_downstream
 
+from .vistav3 import vista_base_v3 as  vista_basev3_downstream
+from.vistav3 import vista_large_v3 as vista_largev3_downstream
+
 
 from .mae_ldi import mae_base_ldi
 from .mum_ldi import mum_base_ldi

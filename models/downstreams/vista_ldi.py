@@ -3,7 +3,7 @@ from typing import Optional, Sequence
 import torch
 from torch import nn
 
-from models.autoencoder import Encoder
+from models.autoencoder import EncoderV2
 from models.heads.dpt_head import LayeredDPTHead
 
 
@@ -49,7 +49,7 @@ class Vista_LDI(nn.Module):
         assert max(intermediate_layer_idx) < encoder_depth, \
             f"{intermediate_layer_idx} out of range for encoder_depth={encoder_depth}"
 
-        self.encoder = Encoder(
+        self.encoder = EncoderV2(
             img_size=img_size,
             patch_size=patch_size,
             in_chans=in_channels,

@@ -39,7 +39,8 @@ from models import (  # noqa: E402,F401  (used through eval(args.model))
     mum_base_downstream, mum_large_downstream,
     muskie_base_downstream, muskie_large_downstream,
     vista_base_downstream, vista_large_downstream,
-    vista_basev2_downstream, vista_largev2_downstream
+    vista_basev2_downstream, vista_largev2_downstream,
+    vista_basev3_downstream, vista_largev3_downstream
 )
 import utils.misc as misc  # noqa: E402
 from utils.inference import vis_depth_maps  # noqa: E402

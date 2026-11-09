@@ -24,6 +24,7 @@ from .dtu_NVS import DTU_NVS
 from .eth3d_NVS import ETH3D_NVS
 from .sevenscenes_NVS import Sevenscenes_NVS
 from .nrgbd_NVS import NRGBD_NVS
+from .scannetpp_NVS import ScanNetPP_NVS
 
 
 

@@ -233,7 +233,7 @@ class VistaV2(nn.Module):
         # Loss weighting
         # ====================================================
 
-        lambda_b=0.40,         # weight of the B reconstruction loss (0 disables it)
+        lambda_b=1.0,         # weight of the B reconstruction loss (0 disables it)
 
         norm_pix_loss=True,
 
@@ -749,14 +749,17 @@ class VistaV2(nn.Module):
 
         return loss, masked_rgb, reconstructed_rgb, loss_dict, b_masked_rgb, b_recon_rgb
 
-
 # ================================================================
 # VISTA V2 factories
+#
+# Each factory holds its defaults in a dict; any keyword argument
+# overrides the matching default (e.g. decoder_depth=4, lambda_b=1.0)
+# instead of raising "got multiple values for keyword argument".
 # ================================================================
 
 def vista_v2_small(patch_size=16, img_size=224, **kwargs):
 
-    model = VistaV2(
+    config = dict(
         patch_size=patch_size,
         img_size=img_size,
 
@@ -773,16 +776,14 @@ def vista_v2_small(patch_size=16, img_size=224, **kwargs):
         decoder_embed_dim=256,
         decoder_depth=8,
         decoder_num_heads=8,
-
-        **kwargs,
     )
 
-    return model
+    return VistaV2(**{**config, **kwargs})
 
 
 def vista_v2_base(patch_size=16, img_size=224, **kwargs):
 
-    model = VistaV2(
+    config = dict(
         patch_size=patch_size,
         img_size=img_size,
 
@@ -799,16 +800,14 @@ def vista_v2_base(patch_size=16, img_size=224, **kwargs):
         decoder_embed_dim=512,
         decoder_depth=8,
         decoder_num_heads=16,
-
-        **kwargs,
     )
 
-    return model
+    return VistaV2(**{**config, **kwargs})
 
 
 def vista_v2_large(patch_size=16, img_size=224, **kwargs):
 
-    model = VistaV2(
+    config = dict(
         patch_size=patch_size,
         img_size=img_size,
 
@@ -825,8 +824,6 @@ def vista_v2_large(patch_size=16, img_size=224, **kwargs):
         decoder_embed_dim=768,
         decoder_depth=8,
         decoder_num_heads=16,
-
-        **kwargs,
     )
 
-    return model
+    return VistaV2(**{**config, **kwargs})

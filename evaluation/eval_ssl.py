@@ -65,7 +65,7 @@ from models import (  # noqa: E402,F401  (used through eval(args.model))
     mum_base_downstream, mum_large_downstream,
     muskie_base_downstream, muskie_large_downstream,
     vista_base_downstream, vista_large_downstream,
-    vista_basev2_downstream
+    vista_basev2_downstream, vista_basev3_downstream
 )
 
 # --model: any constructor imported above (built through eval(args.model) + state dict), or a model that

@@ -236,3 +236,20 @@ python finetune_ldi.py --train_dataset="ARKitScenes_LDI(split='train', overfit=T
 
 
 python finetune_ldi.py --train_dataset="ScanNet_LDI(split='train', overfit=True, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml')" --test_dataset "ScanNet_LDI(split='val', overfit=True, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_ldi.yaml')"  --epochs=1000 --batch_size=8 --eval_freq=10 --save_freq=5 --keep_freq=5 --print_freq=5 --output_dir="/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/poincar3_base_L1_loss_scannetv2_overfitting_model" --model "poincar3_ldi(num_layers=4)"
+
+
+
+
+python train_sslv3.py  \
+  --train_dataset "Hypersim_NVS(split='train', overfit=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" \
+  --test_dataset  "Hypersim_NVS(split='val', overfit=True, n_target_views=2, max_views =6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" \
+  --model "vista_v3_base()" \
+  --lr 2e-4 \
+  --epochs 1000 \
+  --batch_size 8 \
+  --accum_iter 1 \
+  --save_freq 10 \
+  --keep_freq 10 \
+  --eval_freq 10 \
+  --print_freq 1 \
+  --output_dir "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav3_model_ssl_overfitting_model_1000epochs_two_losses/"

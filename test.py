@@ -1,6 +1,6 @@
 import torch
 
-from models import vista_v2_base
+from models import vista_basev3_downstream
 # MuMCrossViewAutoEncoder_DPT, MuMCrossViewDecoders
 
 B = 2
@@ -11,9 +11,10 @@ H = W = 224
 reference_images = torch.randn(B, S_ref, 3, H, W).cuda()
 source_images = torch.randn(B, S_t, 3, H, W).cuda()
 
-model = vista_v2_base(num_clean = 2).cuda()
+model = vista_basev3_downstream().cuda()
 
-predictions = model(reference_images, source_images)
+predictions = model(reference_images)
+
 breakpoint()
 
 # loss, pred, pred_rgb,  mask = model(reference_images, source_images, mask_ratio = 0.75)
