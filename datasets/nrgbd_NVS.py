@@ -78,6 +78,8 @@ class NRGBD_NVS(BaseDataset):
         if self.overfit:
             self.split = "train"
 
+        self.vis = split == "vis"
+
         self.in_domain_eval = in_domain_eval
         self.stage = stage
         self.aug_crop = opts.AUG_CROP
@@ -137,6 +139,23 @@ class NRGBD_NVS(BaseDataset):
         self.seq_keys = sorted(valid_data.keys())
         self.data = valid_data
 
+
+        if self.vis:
+            vis_path = os.path.join(
+                self.root_dir,
+                "nrgbd_visualization_set__40_test_samples.pkl",
+            )
+
+            if not os.path.exists(vis_path):
+                self.save_random_keys(
+                    self.seq_keys,
+                    save_path=vis_path,
+                    num_samples=40,
+                )
+
+            with open(vis_path, "rb") as f:
+                self.seq_keys = pkl.load(f)
+
         # Deterministic test subsampling happens inside the dataloader.
         if self.split == "test":
             n_test_samples = 200
@@ -163,6 +182,8 @@ class NRGBD_NVS(BaseDataset):
 
             with open(val_path, "rb") as f:
                 self.seq_keys = pkl.load(f)
+
+        
 
         self.keys = self.seq_keys
 

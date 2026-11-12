@@ -856,6 +856,123 @@ class MuMAutoEncoder(nn.Module):
             masked_rgb = masked_rgb.reshape(B, S, C_in, H, W)
             reconstructed_rgb = reconstructed_rgb.reshape(B, S, C_in, H, W)
         return loss, masked_rgb, reconstructed_rgb
+
+    
+    # ========================================================
+    # RECONSTRUCTION FOR EVALUATION
+    # ========================================================
+
+    def _encode_with_mask(self, imgs, mask=None):
+        """
+        Frame-wise encoder with a GIVEN mask (no sampling).
+        imgs: [N, 3, H, W]; mask: [N, L] bool (1 = masked) or None (all visible).
+        Returns: tokens [N, 1 + L_enc, C], ids_restore [N, L] or None
+                 (None = all L tokens kept, i.e. no mask or placeholder mode).
+        """
+        x = self.patch_embed(imgs)                                          # [N, h, w, C]
+        rope_sincos = self.rope_embed(H=x.shape[1], W=x.shape[2])
+        x = x.flatten(1, 2)                                                 # [N, L, C]
+        N, L, C = x.shape
+        ids_restore = None
+
+        if mask is not None and mask.any():
+            if self.n_ref_views > 0:
+                # placeholder mode (as in training with clean reference views): keep all tokens
+                x = torch.where(mask.unsqueeze(-1), self.mask_placeholder.to(x.dtype), x)
+            else:
+                # drop masked tokens, visible ones first in their original order
+                keep = (~mask).sum(dim=1)
+                if not torch.all(keep == keep[0]):
+                    raise ValueError("MuM needs the same number of visible patches in every sample")
+                len_keep = int(keep[0])
+                ids_shuffle = torch.argsort(mask.float(), dim=1, stable=True)
+                ids_restore = torch.argsort(ids_shuffle, dim=1)
+                ids_keep = ids_shuffle[:, :len_keep]
+                x = torch.gather(x, 1, ids_keep.unsqueeze(-1).expand(-1, -1, C))
+
+                # drop the masked positions from RoPE too (same as forward_encoder)
+                sin, cos = rope_sincos
+                sin_vis = sin[ids_keep].unsqueeze(1).repeat(1, self.num_heads, 1, 1)
+                cos_vis = cos[ids_keep].unsqueeze(1).repeat(1, self.num_heads, 1, 1)
+                rope_sincos = (sin_vis, cos_vis)
+
+        x = torch.cat([self.cls_token.expand(N, -1, -1), x], dim=1)
+        for blk in self.blocks:
+            x = blk(x, rope_sincos)
+        return self.norm(x), ids_restore
+
+    def _to_decoder_tokens(self, enc, ids_restore):
+        """Encoder tokens -> decoder tokens [N, 1 + L, Cd], mask tokens inserted and unshuffled."""
+        x = self.decoder_embed(enc)
+        if ids_restore is None:
+            return x
+        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
+        x_ = torch.gather(x_, 1, ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
+        return torch.cat([x[:, :1, :], x_], dim=1)
+
+    def _run_decoder(self, x, B, S, H, W):
+        """Alternating frame / global decoder blocks (same as forward_decoder after unshuffling)."""
+        sin, cos = self.rope_embed_decoder(H=H // self.patch_size, W=W // self.patch_size)
+        rope_sincos_frame = (sin, cos)
+        pos_special = torch.zeros(1 + self.n_storage_tokens, sin.shape[-1], device=sin.device, dtype=sin.dtype)
+        sin, cos = torch.cat([pos_special, sin]), torch.cat([pos_special, cos])
+        rope_sincos_global = (sin.repeat(S, 1), cos.repeat(S, 1))
+
+        _, P, C = x.shape
+        for frame_block, global_block in zip(self.decoder_frame_blocks, self.decoder_global_blocks):
+            x = frame_block(x.reshape(B * S, P, C), rope_sincos_frame)
+            x = global_block(x.reshape(B, S * P, C), rope_sincos_global)
+        x = self.decoder_norm(x.reshape(B * S, P, C))
+        return self.decoder_pred(x)[:, 1:, :]                               # [B*S, L, p*p*3]
+
+    @torch.no_grad()
+    def reconstruct(self, images, view_masks, mode="encoder"):
+        """
+        Reconstruct the masked target view with a GIVEN mask (evaluation only).
+
+        images:     [B, V, 3, H, W] in [0, 1]. View 0 = target, views 1.. = clean sources.
+        view_masks: [B, V, L] bool, 1 = masked. Only view 0's mask is used (sources clean).
+        mode:       "encoder" -> target + clean sources (cross-view through the decoder)
+                    "single"  -> target only
+        Returns:    [B, 3, H, W] RGB in [0, 1]; masked patches reconstructed,
+                    visible patches copied from the input.
+        """
+        B, V, C_in, H, W = images.shape
+        target = images[:, 0].float()                                      # [B, 3, H, W]
+        t_mask = view_masks[:, 0].bool()                                   # [B, L]
+        sources = images[:, 1:] if (mode == "encoder" and V > 1) else images[:, :0]
+        n_src = sources.shape[1]
+
+        # Encoder is frame-wise: encode sources and target separately
+        # (different numbers of visible tokens), then join them in the decoder.
+        tgt_enc, tgt_restore = self._encode_with_mask(target, t_mask)
+        tgt_dec = self._to_decoder_tokens(tgt_enc, tgt_restore)            # [B, 1 + L, Cd]
+
+        if n_src > 0:
+            src_enc, _ = self._encode_with_mask(sources.reshape(B * n_src, C_in, H, W).float())
+            src_dec = self._to_decoder_tokens(src_enc, None)               # [B*n_src, 1 + L, Cd]
+            P, Cd = tgt_dec.shape[1:]
+            # clean views first, then the masked target (same order as training)
+            x = torch.cat([src_dec.reshape(B, n_src, P, Cd), tgt_dec[:, None]], dim=1)
+            S = n_src + 1
+        else:
+            x = tgt_dec[:, None]
+            S = 1
+
+        pred = self._run_decoder(x.reshape(B * S, *x.shape[2:]), B, S, H, W)
+        pred = pred.reshape(B, S, *pred.shape[1:])[:, -1].float()          # target = last view
+
+        # patches -> RGB, same conversion as forward_loss
+        if self.norm_pix_loss:
+            gt = self.patchify(target)
+            mean = gt.mean(dim=-1, keepdim=True)
+            std = torch.sqrt(gt.var(dim=-1, keepdim=True) + 1e-6)
+            pred_rgb = (pred * std + mean).clamp(0.0, 1.0)
+        else:
+            pred_rgb = pred.sigmoid()
+
+        return self.fill_masked_patches(target, t_mask, pred_rgb)          # [B, 3, H, W]
         
 
     def forward_features(self, x):

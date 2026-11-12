@@ -713,6 +713,70 @@ class MultiViewCroco(nn.Module):
         else:
             return enc_tokens
 
+    # ========================================================
+    # RECONSTRUCTION FOR EVALUATION
+    # ========================================================
+
+    @torch.no_grad()
+    def reconstruct(self, images, view_masks, mode="encoder", align_patch_stats=True):
+        """
+        Reconstruct the masked target view with a GIVEN mask (evaluation only).
+
+        images:     [B, V, 3, H, W] in [0, 1]. View 0 = target, views 1.. = clean sources.
+        view_masks: [B, V, L] bool, 1 = masked. Only view 0's mask is used (sources clean).
+        mode:       "encoder" -> clean sources + masked target, jointly through the encoder
+                    "single"  -> target only
+        align_patch_stats:
+                    True  -> rescale each predicted patch to the GT patch mean/std, i.e. the
+                             same information the norm_pix models (Vista, MuM, MAE) get when
+                             their outputs are de-normalized. Use this for the main comparison.
+                    False -> Muskie's raw RGB prediction.
+        Returns:    [B, 3, H, W] RGB in [0, 1]; masked patches reconstructed,
+                    visible patches copied from the input.
+        """
+        B, V, C_in, H, W = images.shape
+        p = self.patch_size
+        Hp, Wp = H // p, W // p
+        L = Hp * Wp
+        target = images[:, 0].float()                                        # [B, 3, H, W]
+        t_mask = view_masks[:, 0].bool()                                     # [B, L]
+
+        # clean reference views first, masked target last (same layout as training)
+        if mode == "single" or V == 1:
+            views, masks = images[:, :1], t_mask[:, None]
+        else:
+            views = torch.cat([images[:, 1:], images[:, :1]], dim=1)
+            masks = torch.cat([torch.zeros(B, V - 1, L, dtype=torch.bool, device=images.device),
+                               t_mask[:, None]], dim=1)
+        S = views.shape[1]
+
+        # patch embed + placeholder at masked positions (replaces random_masking)
+        x, _ = self.patch_embed(views.reshape(B * S, C_in, H, W).float())
+        x = x.view(B, S, L, -1)
+        x = torch.where(masks.unsqueeze(-1), self.mask_placeholder.to(x.dtype), x)
+        x = torch.cat((self.register_tokens.expand(B, S, -1, -1).to(x.dtype), x), dim=2)
+
+        pos = self.position_getter(B * S, Hp, Wp, device=images.device).view(B, S, L, -1) + 1
+        pos = torch.cat((torch.zeros(B, S, self.num_register_tokens, 2, device=pos.device, dtype=pos.dtype), pos), dim=2)
+
+        for blk in self.blocks:
+            x = blk(x, pos)
+
+        x = self.decoder_pred(self.decoder_norm(x[:, :, self.num_register_tokens:]))
+        pred, _ = torch.chunk(x, 2, dim=-1)                                 # drop the confidence
+        pred = pred[:, -1].float()                                          # target view: [B, L, 3*p*p]
+
+        if align_patch_stats:
+            # per-patch mean/std alignment to the GT patch, matching the norm_pix models
+            gt = F.pixel_unshuffle(target, p).flatten(2).transpose(1, 2)    # [B, L, 3*p*p], same layout
+            g_mean, g_std = gt.mean(-1, keepdim=True), torch.sqrt(gt.var(-1, keepdim=True) + 1e-6)
+            p_mean, p_std = pred.mean(-1, keepdim=True), torch.sqrt(pred.var(-1, keepdim=True) + 1e-6)
+            pred = (pred - p_mean) / p_std * g_std + g_mean
+
+        # patch tokens -> image, same pixel_shuffle layout as forward()
+        img = F.pixel_shuffle(pred.transpose(1, 2).reshape(B, -1, Hp, Wp), upscale_factor=p)
+        return self.fill_masked_patches(target, t_mask, img)                # clamps to [0, 1]
+
 def muskie_small(**kwargs):
     return MultiViewCroco(embed_dim=384, depth=6, num_heads=6, **kwargs)
 

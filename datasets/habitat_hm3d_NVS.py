@@ -93,6 +93,7 @@ class Habitat_HM3D_NVS(BaseDataset):
         super().__init__(self.common_conf, *args, **kwargs)
 
         self.split = split
+
         self.load_depth = load_depth
 
         self.training = split == "train"
@@ -100,6 +101,11 @@ class Habitat_HM3D_NVS(BaseDataset):
 
         if self.overfit:
             self.split = "train"
+
+        self.vis = split == "vis"
+
+        if self.vis:
+            self.split = "val"
 
         self.in_domain_eval = in_domain_eval
         self.stage = stage
@@ -167,13 +173,14 @@ class Habitat_HM3D_NVS(BaseDataset):
                 self.save_random_keys(self.seq_keys, save_path=val_path, num_samples=2000)
             with open(val_path, 'rb') as f:
                 self.seq_keys = pkl.load(f)
+
         
-        # if self.split == "train":
-        #     train_path = f"{self.root_dir}/habitat_hm3d_train_set__100_000_samples.pkl"
-        #     if not os.path.exists(train_path):
-        #         self.save_random_keys(self.seq_keys, save_path=train_path, num_samples=100000)
-        #     with open(train_path, 'rb') as f:
-        #         self.seq_keys = pkl.load(f)
+        if self.vis:
+            vis_path = f"{self.root_dir}/habitat_hm3d_train_set__40_samples_cvpr2027_vis_samples.pkl"
+            if not os.path.exists(vis_path):
+                self.save_random_keys(self.seq_keys, save_path=vis_path, num_samples=40)
+            with open(vis_path, 'rb') as f:
+                self.seq_keys = pkl.load(f)
 
         self.keys = self.seq_keys                            # name used by the old code
         print(f"Habitat_HM3D_NVS [{split}] {len(self.seq_keys):,} sequences from {self.lmdb_path}")

@@ -38,7 +38,7 @@ HOSTNAME=$(hostname)
 # ---------------------------
 # Set resources based on host
 # ---------------------------
-MAX_MEMORY=640         # GB
+MAX_MEMORY=320         # GB
 
 # Torch per-GPU share = node CPUs / GPUs and node memory / GPUs (more is rejected:
 # "GPU job setup is not valid")
@@ -126,10 +126,10 @@ sbatch \
           --nproc_per_node=${NUM_GPUS} \
           --master_port=8794 \
           finetune_ldi.py \
-          --train_dataset=\"ScannetPP_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
-          --test_dataset=\"ScannetPP_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
+          --train_dataset=\"ScannetPP_LDI(split='train', max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
+          --test_dataset=\"ScannetPP_LDI(split='val',max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
           --model=\"poincar3_ldi(num_layers=4)\" \
-          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/TODO_POINCAR3_SSL_CHECKPOINT_FOLDER\" \
+          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/poincar3_weights/poincar3_ffrecon_adapter.pth" \
           --lr=1e-4 \
           --epochs=${EPOCHS} \
           --batch_size=64\
@@ -138,4 +138,4 @@ sbatch \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/poincar3_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_focal_loss_only_bs64_model_224_x_224_${EPOCHS}ep/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/poincar3_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_bs64_model_224_x_224_${EPOCHS}ep/\""

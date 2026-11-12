@@ -2,7 +2,7 @@ loss:
   _target_: loss.MultitaskLoss
 
   camera:
-    weight: 5.0
+    weight: 1.0
     loss_type: "l1"
 
   depth:

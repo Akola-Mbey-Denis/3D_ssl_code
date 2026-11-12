@@ -2,84 +2,64 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import logging
+
 
 
 from models.utils.pose_enc import extri_intri_to_pose_encoding
 
-def normalize_pose_scale(poses: torch.Tensor) -> torch.Tensor:
-    """Recenter each sequence's extrinsics on frame 0, then scale translation
-    by the mean camera-center distance from frame 0 -- the camera-loss GT
-    target's own normalization, *not* `normalize_batch_scale`'s depth-derived
-    `scale` above.
+def normalize_scene_by_points(
+    extrinsics: torch.Tensor,
+    depths: torch.Tensor,
+    masks: torch.Tensor,
+    intrinsics: torch.Tensor | None = None,   # unused, kept for call-site compatibility
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """ONE scale per sample for depth AND camera translations.
 
-    Why a separate function: this training mixture spans wildly different
-    depth regimes batch to batch (aerial/landmark/indoor/object-scan scenes
-    mixed by `DynamicBatchSampler`) -- `normalize_batch_scale`'s mean-GT-depth
-    `scale` swung ~300x across batches of a real run (3.75 to 1139.8, see
-    `experiments/ffrecon/train_poincar3.py`'s wandb `scale` history), which is
-    fine for `depths_norm` (each batch's own depth is self-normalized to mean
-    ~1 regardless of domain) but corrupts `compute_camera_loss`'s flat-L1
-    translation target: the target's effective units become a function of
-    ambient scene depth, decoupled from actual camera motion, so a fixed-
-    magnitude translation error costs 300x more loss in a close-up batch than
-    a far-away one. That shows up as `loss_camera`/AUC@30 plateauing early
-    while RRA (rotation, untouched by this scale factor) keeps climbing
-    cleanly and RTA (translation) stalls/degrades -- confirmed against a real
-    run's `relpose_megadepth/RRA@15` vs `RTA@15` curves.
+      1. recentre the extrinsics on frame 0 (frame 0 = identity, world = camera-0 frame),
+      2. scale = mean of the valid GT depth values over all views of the sample,
+      3. divide the translations and the depths by that scale.
 
-    Mean camera-center distance is bounded ~O(1) by construction (it is
-    exactly what gets divided out) and depends only on camera motion, not on
-    scene content, so it cannot blow up the way a depth-derived scale can
-    across a heterogeneous dataset mixture.
-
-    Deliberately does *not* touch `depths_norm`/`normalize_batch_scale`'s own
-    `poses_norm`: those two stay on the shared depth-derived scale, since
-    anything composing depth with pose translation needs them on one scale.
-    Only `compute_camera_loss`'s GT argument uses this function's output.
+    A sample without any valid depth falls back to the mean camera-centre distance from
+    camera 0 (or 1 for a single camera), so translations are never divided by ~0.
 
     Args:
-        poses: `(B, N, 4, 4)` cam-from-world extrinsics.
-
+        extrinsics: (B, S, 3, 4) or (B, S, 4, 4) cam-from-world.
+        depths:     (B, S, H, W) GT z-depth (0 = invalid).
+        masks:      (B, S, H, W) valid-depth mask.
     Returns:
-        `(B, N, 4, 4)` recentered + rescaled extrinsics.
+        extrinsics_norm (B, S, 4, 4), depths_norm (B, S, H, W), scale (B,)
     """
-    batch_size = poses.shape[0]
-    world_from_cam0 = torch.linalg.inv(poses[:, 0])
-    poses_norm = poses @ world_from_cam0.unsqueeze(1)
+    B, S, H, W = depths.shape
+    w2c = extrinsics.float()
+    if w2c.shape[-2] == 3:
+        bottom = torch.zeros_like(w2c[..., :1, :])
+        bottom[..., 0, 3] = 1.0
+        w2c = torch.cat([w2c, bottom], dim=-2)
+    w2c = w2c @ torch.linalg.inv(w2c[:, :1])                       # frame 0 = identity
 
-    R = poses_norm[..., :3, :3]
-    t = poses_norm[..., :3, 3]
-    # Camera centers in the recentered frame: c_i = -R_i^T t_i (c_0 == 0).
-    centers = -(R.transpose(-1, -2) @ t.unsqueeze(-1)).squeeze(-1)  # (B, N, 3)
-    scale = centers.norm(dim=-1).mean(dim=1).clamp_min(1e-6)  # (B,)
+    valid = masks.bool() & (depths > 0) & torch.isfinite(depths)
+    d = depths.float()
 
-    poses_norm = poses_norm.clone()
-    poses_norm[..., :3, 3] = t / scale.view(batch_size, 1, 1)
-    return poses_norm
+    n_valid = valid.sum(dim=(1, 2, 3)).float()
+    depth_sum = torch.where(valid, d, torch.zeros_like(d)).sum(dim=(1, 2, 3))
+    scale = depth_sum / n_valid.clamp_min(1.0)
 
-def compute_camera_loss(
-    pred_pose_encoding: torch.Tensor,
-    gt_poses: torch.Tensor,
-    gt_K: torch.Tensor,
-    image_hw: tuple[int, int],
-) -> dict[str, torch.Tensor]:
-    """Flat L1 over the whole 9D `absT_quaR_FoV` pose encoding, which is more
-    stable here than VGGT's Huber with separately-weighted
-    translation/rotation/FOV components and per-component outlier clamping.
-    `CameraHead` is single-shot (see its docstring), so there is only ever one
-    refinement stage to weight.
+    # fallback for samples without valid depth: mean camera-centre distance from camera 0, else 1
+    centers = -(w2c[..., :3, :3].transpose(-1, -2) @ w2c[..., :3, 3:]).squeeze(-1)   # (B, S, 3), c_0 = 0
+    cam_scale = centers.norm(dim=-1).sum(dim=1) / max(S - 1, 1)
+    fallback = torch.where(cam_scale > 1e-6, cam_scale, torch.ones_like(cam_scale))
+    scale = torch.where(n_valid > 0, scale, fallback).clamp(min=1e-6, max=1e6)        # (B,)
 
-    Args:
-        pred_pose_encoding: `CameraHead.forward`'s single-element list,
-            unwrapped by the caller (`pred_pose_enc_list[-1]`).
-        gt_poses: `(B, N, 4, 4)` cam-from-world extrinsics.
-        gt_K: `(B, N, 3, 3)` intrinsics.
-        image_hw: `(height, width)` `pred_pose_encoding` was computed at.
-    """
-    gt_pose_encoding = extri_intri_to_pose_encoding(gt_poses[..., :3, :], gt_K, image_hw)
-    loss = F.l1_loss(pred_pose_encoding, gt_pose_encoding)
-    return {"loss_camera": loss}
+    w2c_norm = w2c.clone()
+    # w2c_norm[..., :3, 3] = w2c[..., :3, 3] / scale.view(B, 1)
+    w2c_norm[..., :3, 3] = w2c[..., :3, 3] / scale.view(B, 1, 1)
+    depths_norm = torch.where(valid, d / scale.view(B, 1, 1, 1), torch.zeros_like(d))
 
+    return w2c_norm, depths_norm, scale
 
 def check_and_fix_inf_nan(input_tensor, loss_name="default", hard_max=100):
     """
@@ -113,193 +93,46 @@ def check_and_fix_inf_nan(input_tensor, loss_name="default", hard_max=100):
 
 
 class MultitaskLoss(nn.Module):
-    """Combines camera, depth, and pointmap losses."""
+    """Camera + depth losses. GT depth and GT poses are normalised once, with one scale per sample
+    (normalize_scene_by_points), so both losses see targets in the same units."""
 
-    def __init__(
-        self,
-        camera=None,
-        depth=None,
-        layered_depth=None,
-        # point=None,
-    ):
+    def __init__(self, camera=None, depth=None):
         super().__init__()
+        self.camera_loss = CameraLoss(**camera) if camera is not None else None
+        self.depth_loss = DepthLoss(**depth) if depth is not None else None
 
-        self.camera_loss = CameraLoss(**(camera or {}))
-        self.depth_loss = DepthLoss(**(depth or {}))
-        self.layered_depth_loss = LayeredDepthLoss(**(layered_depth or {}))
-        self.layered_depth_enabled = layered_depth is not None
-        # self.pointmap_loss = PointmapLoss(**(point or {}))
+    def forward(self, predictions, gt_depths, masks, gt_intrinsics, gt_extrinsics, images):
+        with torch.autocast(device_type=gt_depths.device.type, enabled=False):
+            gt_extrinsics, gt_depths, scene_scale = normalize_scene_by_points(gt_extrinsics, gt_depths, masks, gt_intrinsics)
 
-        self.camera_enabled = camera is not None
-        self.depth_enabled = depth is not None
-        # self.pointmap_enabled = point is not None
+        losses = {"scene_scale": scene_scale.mean().detach()}
+        objective = 0.0
 
-        # if track is not None:
-        #     raise NotImplementedError("Tracking loss is not cleaned up yet.")
+        if self.camera_loss is not None and "pose_enc_list" in predictions:
+            losses.update(self.camera_loss(predictions, gt_extrinsics, gt_intrinsics, images))
+            objective = objective + losses["loss_camera"]
 
-    def forward(self, predictions, gt_depths, masks, gt_intrinsics, gt_extrinsics, images,
-                gt_layers=None, gt_layer_masks=None):
-        losses = {}
-        objective =  0.0
-
-        if "pose_enc_list" in predictions and self.camera_enabled:
-            camera_losses = self.camera_loss(predictions = predictions, gt_depth_masks = masks,  gt_extrinsics = gt_extrinsics, gt_intrinsics = gt_intrinsics, images = images)
-
-            objective = objective + camera_losses["loss_camera"]
-            losses.update(camera_losses)
-
-        if "depth" in predictions and self.depth_enabled:
-            depth_losses = self.depth_loss(predictions = predictions, gt_depths = gt_depths, masks = masks)
-            objective = objective + depth_losses["loss_depth"]
-
-            losses.update(depth_losses)
-
-        if self.layered_depth_enabled:
-            if "layered_depth" not in predictions:
-                raise KeyError("layered_depth loss enabled but the model returned no 'layered_depth'")
-            if gt_layers is None or gt_layer_masks is None:
-                raise ValueError("layered_depth loss needs gt_layers and gt_layer_masks")
-            layered_losses = self.layered_depth_loss(predictions, gt_layers, gt_layer_masks)
-            objective = objective + layered_losses["loss_layered_depth"]
-            losses.update(layered_losses)
-
-        # if "world_points" in predictions and self.pointmap_enabled:
-        #     point_losses = self.pointmap_loss(predictions, batch)
-        #     objective = objective + point_losses["loss_pointmap"]
-        #     losses.update(point_losses)
+        if self.depth_loss is not None and "depth" in predictions:
+            losses.update(self.depth_loss(predictions, gt_depths, masks))
+            objective = objective + losses["loss_depth"]
 
         losses["objective"] = objective
-
         return losses
-
 
 # -----------------------------------------------------------------------------
 # Camera loss
 # -----------------------------------------------------------------------------
-
-
 class CameraLoss(nn.Module):
-    """
-    Camera pose loss over translation, rotation, and focal length.
-
-    Expected predictions:
-        pose_enc_list: list[(B, S, D)]
-
-    Expected batch:
-        extrinsics: (B, S, ...)
-        intrinsics: (B, S, ...)
-        images:      (B, S, C, H, W)
-        point_masks: (B, S, H, W)
-    """
-
-    def __init__(
-        self,
-        weight=1.0,
-        loss_type="l1",
-        gamma=0.6,
-        pose_encoding_type="absT_quaR_FoV",
-        weight_trans=1.0,
-        weight_rot=1.0,
-        weight_focal=0.5,
-        min_valid_points=100,
-        **kwargs,
-    ):
+    def __init__(self, pose_encoding_type="absT_quaR_FoV", **kwargs):   # other old args accepted, unused
         super().__init__()
-
-        self.weight = weight
-        self.loss_type = loss_type
-        self.gamma = gamma
         self.pose_encoding_type = pose_encoding_type
 
-        self.weight_trans = weight_trans
-        self.weight_rot = weight_rot
-        self.weight_focal = weight_focal
-        self.min_valid_points = min_valid_points
-
-    def forward(self, predictions, gt_extrinsics, gt_intrinsics, images, gt_depth_masks):
-        pred_stages = predictions["pose_enc_list"]
-
-        valid_frames = gt_depth_masks[:, 0].sum(dim=(-1, -2)) > self.min_valid_points
-
-        # Normalize the GT poses first (Poincar3's normalize_pose_scale): recenter on frame 0 (identity),
-        # translations divided by the mean camera-centre distance.
-        with torch.autocast(device_type=gt_extrinsics.device.type, enabled=False):
-            gt_w2c = gt_extrinsics.float()
-            if gt_w2c.shape[-2] == 3:                                   # (B, S, 3, 4) -> (B, S, 4, 4)
-                bottom = torch.zeros_like(gt_w2c[..., :1, :])
-                bottom[..., 0, 3] = 1.0
-                gt_w2c = torch.cat([gt_w2c, bottom], dim=-2)
-            gt_w2c = normalize_pose_scale(gt_w2c)
-
-        gt_pose = extri_intri_to_pose_encoding(
-            gt_w2c[..., :3, :],
-            gt_intrinsics,
-            images.shape[-2:],
-            pose_encoding_type=self.pose_encoding_type,
-        )
-
-        loss_T = 0.0
-        loss_R = 0.0
-        loss_FL = 0.0
-
-        num_stages = len(pred_stages)
-
-        for stage_idx, pred_pose in enumerate(pred_stages):
-            stage_weight = self.gamma ** (num_stages - stage_idx - 1)
-
-            if valid_frames.any():
-                stage_T, stage_R, stage_FL = self._single_stage(
-                    pred_pose[valid_frames],
-                    gt_pose[valid_frames],
-                )
-            else:
-                zero = pred_pose.mean() * 0.0
-                stage_T = zero
-                stage_R = zero
-                stage_FL = zero
-
-            loss_T = loss_T + stage_weight * stage_T
-            loss_R = loss_R + stage_weight * stage_R
-            loss_FL = loss_FL + stage_weight * stage_FL
-
-        loss_T = loss_T / num_stages
-        loss_R = loss_R / num_stages
-        loss_FL = loss_FL / num_stages
-
-        loss_camera = (
-            self.weight_trans * loss_T
-            + self.weight_rot * loss_R
-            + self.weight_focal * loss_FL
-        )
-
-        loss_camera = loss_camera * self.weight
-
-        return {
-            "loss_camera": loss_camera,
-            "loss_T": loss_T,
-            "loss_R": loss_R,
-            "loss_FL": loss_FL,
-        }
-
-    def _single_stage(self, pred, gt):
-        if self.loss_type == "l1":
-            loss_T = (pred[..., :3] - gt[..., :3]).abs().mean()
-            loss_R = (pred[..., 3:7] - gt[..., 3:7]).abs().mean()
-            loss_FL = (pred[..., 7:] - gt[..., 7:]).abs().mean()
-
-        elif self.loss_type == "l2":
-            loss_T = (pred[..., :3] - gt[..., :3]).norm(dim=-1).mean()
-            loss_R = (pred[..., 3:7] - gt[..., 3:7]).norm(dim=-1).mean()
-            loss_FL = (pred[..., 7:] - gt[..., 7:]).norm(dim=-1).mean()
-
-        else:
-            raise ValueError(f"Unknown camera loss type: {self.loss_type}")
-
-        loss_T = check_and_fix_inf_nan(loss_T, "loss_T").clamp(max=100)
-        loss_R = check_and_fix_inf_nan(loss_R, "loss_R")
-        loss_FL = check_and_fix_inf_nan(loss_FL, "loss_FL")
-
-        return loss_T, loss_R, loss_FL
+    def forward(self, predictions, gt_extrinsics, gt_intrinsics, images, gt_depth_masks=None):
+        pred_pose_encoding = predictions["pose_enc_list"][-1]
+        gt_pose_encoding = extri_intri_to_pose_encoding(
+            gt_extrinsics[..., :3, :], gt_intrinsics, images.shape[-2:], pose_encoding_type=self.pose_encoding_type)
+        loss = F.l1_loss(pred_pose_encoding, gt_pose_encoding)
+        return {"loss_camera": loss}
 
 
 # -----------------------------------------------------------------------------
@@ -362,7 +195,6 @@ def depth_gradient_loss_multi_scale(pred, gt, mask, scales=4):
         total = total + depth_gradient_loss(pred[:, ::step, ::step], gt[:, ::step, ::step], mask[:, ::step, ::step])
     return total / scales
 
-
 class DepthLoss(nn.Module):
     """
     VGGT depth loss:
@@ -373,7 +205,7 @@ class DepthLoss(nn.Module):
 
     Predictions:
         predictions["depth"]:      (B, S, H, W) or (B, S, H, W, 1)
-        predictions["depth_conf"]: (B, S, H, W)
+        predictions["depth_conf"]: (B, S, H, W), or None / missing -> no confidence term (loss_conf = 0)
     Ground truth:
         gt_depths: (B, S, H, W)
         masks:     (B, S, H, W)
@@ -406,7 +238,7 @@ class DepthLoss(nn.Module):
         pred = predictions["depth"]
         if pred.ndim == 5:
             pred = pred.squeeze(-1)
-        conf = predictions["depth_conf"]
+        conf = predictions.get("depth_conf")          # None -> no confidence term
         gt = gt_depths
         mask = masks.bool()
 
@@ -414,12 +246,16 @@ class DepthLoss(nn.Module):
             zero = (0.0 * pred).mean()
             return {"loss_depth": zero, "loss_conf_depth": zero, "loss_reg_depth": zero, "loss_grad_depth": zero}
 
-        loss_reg = (pred[mask] - gt[mask]).abs()
-        confidence = conf[mask]
-        loss_conf = self.gamma * loss_reg * confidence - self.alpha * torch.log(confidence)
+        err = (pred[mask] - gt[mask]).abs()
 
-        loss_conf = filter_by_quantile(loss_conf, self.valid_range).mean()
-        loss_reg = filter_by_quantile(loss_reg, self.valid_range).mean()
+        if conf is not None:
+            confidence = conf[mask]
+            loss_conf = self.gamma * err * confidence - self.alpha * torch.log(confidence)
+            loss_conf = filter_by_quantile(loss_conf, self.valid_range).mean()
+        else:
+            loss_conf = (0.0 * pred).mean()
+
+        loss_reg = filter_by_quantile(err, self.valid_range).mean()
 
         if self.use_gradient_loss:
             B, S, H, W = pred.shape
@@ -440,7 +276,80 @@ class DepthLoss(nn.Module):
             "loss_grad_depth": loss_grad,
         }
 
+class SILogLoss(nn.Module):
+    """
+    Scale-invariant log loss (Eigen et al.), per image, plus your multi-scale gradient loss
+    (depth_gradient_loss_multi_scale, as in DepthLoss) computed on log depth.
 
+        d          = log(pred) - log(gt)                         (valid pixels)
+        loss_silog = sqrt( mean(d^2) - lam * mean(d)^2 )         per image, then averaged
+        loss_grad  = depth_gradient_loss_multi_scale(log pred, log gt, mask)
+        loss_depth = (loss_silog + grad_weight * loss_grad) * weight
+
+    lam = 0   -> plain RMSE in log space (scale matters)
+    lam = 1   -> fully scale-invariant (global scale is free)
+    lam = 0.5 -> in between (common choice); 0.85 as in AdaBins / BTS
+
+    Same interface as DepthLoss:
+        predictions["depth"]:  (B, S, H, W) or (B, S, H, W, 1)   ("depth_conf" ignored)
+        gt_depths:             (B, S, H, W)
+        masks:                 (B, S, H, W)
+    Returns a dict with loss_depth (the objective), loss_silog, loss_grad_depth.
+    """
+
+    def __init__(self, lam=0.85, weight=1.0, gradient_loss_fn="grad", grad_weight=0.5, gradient_scales=4,
+                 eps=1e-6, **kwargs):
+        super().__init__()
+        if gradient_loss_fn not in (None, "grad"):
+            raise ValueError(f"Unknown depth gradient loss: {gradient_loss_fn}")
+        self.lam = lam
+        self.weight = weight
+        self.use_gradient_loss = gradient_loss_fn is not None and grad_weight > 0
+        self.grad_weight = grad_weight
+        self.gradient_scales = gradient_scales
+        self.eps = eps
+
+    def _silog(self, d, mask):
+        """d, mask: [N, H, W] -> scalar (mean over images that have valid pixels)."""
+        n = mask.flatten(1).sum(1)
+        valid = n > 0
+        if not valid.any():
+            return (0.0 * d).sum()
+        d = torch.where(mask, d, torch.zeros_like(d))
+        mean = d.flatten(1).sum(1) / n.clamp_min(1)
+        mean_sq = (d ** 2).flatten(1).sum(1) / n.clamp_min(1)
+        per_img = torch.sqrt((mean_sq - self.lam * mean ** 2).clamp_min(self.eps))
+        return per_img[valid].mean()
+
+    def forward(self, predictions, gt_depths, masks):
+        pred = predictions["depth"]
+        if pred.ndim == 5:
+            pred = pred.squeeze(-1)
+        B, S, H, W = pred.shape
+        pred = pred.reshape(B * S, H, W).float()
+        gt = gt_depths.reshape(B * S, H, W).float()
+        mask = masks.reshape(B * S, H, W).bool() & (gt > self.eps) & torch.isfinite(gt)
+
+        if not mask.any():
+            zero = (0.0 * pred).mean()
+            return {"loss_depth": zero, "loss_silog": zero, "loss_grad_depth": zero}
+
+        log_pred = torch.log(pred.clamp_min(self.eps))
+        log_gt = torch.log(gt.clamp_min(self.eps))
+        loss_silog = self._silog(log_pred - log_gt, mask)
+
+        if self.use_gradient_loss:
+            loss_grad = depth_gradient_loss_multi_scale(
+                log_pred.reshape(B * S, H, W, 1),
+                log_gt.reshape(B * S, H, W, 1),
+                mask,
+                scales=self.gradient_scales,
+            )
+        else:
+            loss_grad = (0.0 * pred).mean()
+
+        loss_depth = (loss_silog + self.grad_weight * loss_grad) * self.weight
+        return {"loss_depth": loss_depth, "loss_silog": loss_silog, "loss_grad_depth": loss_grad}
 # -----------------------------------------------------------------------------
 # Layered depth loss  (DepthLoss per layer + ordering + layer existence)
 class LayeredDepthLoss(nn.Module):

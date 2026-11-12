@@ -110,6 +110,11 @@ class ScanNetPP_NVS(BaseDataset):
 
         if self.overfit:
             self.split = "train"                 # overfit: val/test read the training data
+        
+        self.vis = split == "vis"
+
+        if self.vis:
+            self.split = "val"
 
         self.in_domain_eval = in_domain_eval
         self.stage = stage
@@ -164,7 +169,7 @@ class ScanNetPP_NVS(BaseDataset):
             with open(overfit_path, 'rb') as f:
                 self.seq_keys = pkl.load(f)
         
-        if self.split == "val":
+        if self.split == "val" and not self.vis:
             val_path = f"{self.root_dir}/scannetpp_lmdb_validation_set__2000_samples.pkl"
             if not os.path.exists(val_path):
                 self.save_random_keys(self.seq_keys, save_path=val_path, num_samples=2000)
@@ -176,6 +181,13 @@ class ScanNetPP_NVS(BaseDataset):
             if not os.path.exists(test_path):
                 self.save_random_keys(self.seq_keys, save_path=test_path, num_samples=200)
             with open(test_path, 'rb') as f:
+                self.seq_keys = pkl.load(f)
+        
+        if self.vis:
+            vis_path = f"{self.root_dir}/scannetpp_lmdb_visualization_set__40_cvpr2027_samples.pkl"
+            if not os.path.exists(vis_path):
+                self.save_random_keys(self.seq_keys, save_path=vis_path, num_samples=40)
+            with open(vis_path, 'rb') as f:
                 self.seq_keys = pkl.load(f)
         
         self.keys = self.seq_keys                            # name used by the old code

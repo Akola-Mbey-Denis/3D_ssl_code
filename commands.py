@@ -240,10 +240,10 @@ python finetune_ldi.py --train_dataset="ScanNet_LDI(split='train', overfit=True,
 
 
 
-python train_sslv3.py  \
+python train_sslv2.py  \
   --train_dataset "Hypersim_NVS(split='train', overfit=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" \
   --test_dataset  "Hypersim_NVS(split='val', overfit=True, n_target_views=2, max_views =6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" \
-  --model "vista_v3_base()" \
+  --model "vista_v2_base(lambda_b=1.0, decoder_depth=2)" \ 
   --lr 2e-4 \
   --epochs 1000 \
   --batch_size 8 \
@@ -252,4 +252,13 @@ python train_sslv3.py  \
   --keep_freq 10 \
   --eval_freq 10 \
   --print_freq 1 \
-  --output_dir "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav3_model_ssl_overfitting_model_1000epochs_two_losses/"
+  --output_dir "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav2_model_cross_view_decoder_depth_2_ssl_overfitting_model_1000epochs_two_losses/"
+
+python train_nvd.py --train_dataset "Hypersim_NVS(split='train', overfit=True, n_target_views=1, max_views=3, img_size=224, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" --test_dataset "Hypersim_NVS(split='val', overfit=True, n_target_views=1, max_views=3, img_size=224, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" --model "vista_nvd_base_downstream()" --ckpt_path "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_v2_full_loss_b_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations/" --lr 2e-4 --epochs 1000 --batch_size 8 --accum_iter 1 --save_freq 10 --keep_freq 10 --eval_freq 10 --print_freq 1 --output_dir "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/nvd_vista_overfit_test/"
+
+
+python train_nvd.py --train_dataset "Hypersim_NVS(split='train', overfit=True, load_depth=True, n_target_views=1, max_views=3, img_size=224, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" --test_dataset "Hypersim_NVS(split='val', overfit=True, load_depth=True, n_target_views=1, max_views=3, img_size=224, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" --model "vista_nvd_base_downstream()" --ckpt_path "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_v2_full_loss_b_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations/"  --lr 2e-4 --epochs 3000 --batch_size 8 --accum_iter 1 --save_freq 100 --keep_freq 50 --eval_freq 50 --print_freq 10 --output_dir "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/nvd_vista_overfit_testv4_plucker_tokenizer_vggt_loss_conf_loss/"
+
+
+
+python train_nvd.py --train_dataset "Hypersim_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, img_size=224, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" --test_dataset "Hypersim_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, img_size=224, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" --model "vista_nvd_base_downstream()" --lr 2e-4 --epochs 40 --batch_size 256 --ckpt_path "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_v2_full_loss_b_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations/"  --lr 2e-4 --epochs 40 --batch_size 128 --accum_iter 1 --save_freq 5 --keep_freq 5 --eval_freq 5 --print_freq 100 --output_dir "/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/nvd_vista_finetune_hypersim_testv4_plucker_tokenizer_vggt_depth_loss/"

@@ -772,6 +772,64 @@ class MaskedAutoencoderViT(nn.Module):
 
         return loss, masked_rgb, reconstructed_rgb
 
+    
+    # ========================================================
+    # RECONSTRUCTION FOR EVALUATION
+    # ========================================================
+
+    @torch.no_grad()
+    def reconstruct(self, images, view_masks, mode="single"):
+        """
+        Reconstruct the masked target view with a GIVEN mask (evaluation only).
+
+        images:     [B, V, 3, H, W] in [0, 1]. View 0 = target; any further views (sources)
+                    are ignored, since MAE encodes and decodes every view independently.
+        view_masks: [B, V, L] bool, 1 = masked. Only view 0's mask is used.
+                    Every sample must keep the same number of patches (the encoder drops
+                    masked tokens); the eval harness guarantees this.
+        mode:       unused for MAE (always single-view); kept for a common interface.
+
+        Returns: [B, 3, H, W] RGB in [0, 1]. Masked patches are the reconstruction,
+                 visible patches are copied from the input.
+        """
+        target = images[:, 0].float()                                        # [B, 3, H, W]
+        mask = view_masks[:, 0].bool()                                       # [B, L]
+        B, L = mask.shape
+
+        keep = (~mask).sum(dim=1)
+        if not torch.all(keep == keep[0]):
+            raise ValueError("MAE needs the same number of visible patches in every sample")
+        len_keep = int(keep[0])
+
+        # ---- encoder with the given mask (replaces sample_masking) ----
+        x = self.patch_embed(target) + self.pos_embed[:, 1:, :]              # [B, L, D]
+
+        # visible patches first, in their original order; masked ones after
+        ids_shuffle = torch.argsort(mask.float(), dim=1, stable=True)
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+        ids_keep = ids_shuffle[:, :len_keep]
+        x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+
+        cls_token = self.cls_token + self.pos_embed[:, :1, :]
+        x = torch.cat([cls_token.expand(B, -1, -1), x], dim=1)
+        for blk in self.blocks:
+            x = blk(x)
+        x = self.norm(x)
+
+        # ---- decoder ----
+        pred = self.forward_decoder(x, ids_restore).float()                 # [B, L, p*p*3]
+
+        # ---- patches -> RGB, same conversion as forward_loss ----
+        if self.norm_pix_loss:
+            gt = self.patchify(target)
+            mean = gt.mean(dim=-1, keepdim=True)
+            std = torch.sqrt(gt.var(dim=-1, keepdim=True) + 1e-6)
+            pred_rgb = (pred * std + mean).clamp(0.0, 1.0)
+        else:
+            pred_rgb = pred.sigmoid()
+
+        return self.fill_masked_patches(target, mask, pred_rgb)             # [B, 3, H, W]
+
 
 def mae_vit_base_patch16_dec512d8b(img_size = 224, **kwargs):
     model = MaskedAutoencoderViT(

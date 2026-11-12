@@ -105,13 +105,14 @@ def load_or_dump_keys(path, sequences, n, seed):
 class ScannetPP_LDI(BaseDataset):
     DATASET = "scannetpp"
 
-    def __init__(self, split, config_path, lmdb_path=None, num_layers=None, overfit=False,
+    def __init__(self, split, config_path, lmdb_path=None, num_layers=None,  max_views = 6, overfit=False,
                 keys_dir=None, *args, **kwargs):
         assert split in ("train", "val", "test"), split
         with open(config_path, "r") as f:
             raw_cfg = yaml.safe_load(f)
         opts = CfgNode(raw_cfg)
         self.opts = opts
+        self.max_views = max_views
         self.common_conf = opts.COMMON
         super().__init__(self.common_conf, *args, **kwargs)
 
@@ -192,6 +193,10 @@ class ScannetPP_LDI(BaseDataset):
         if seq_index is None:
             raise ValueError("get_data needs seq_index (no random sequence pick)")
         scene, stems = self.sequences[seq_index]
+
+        if self.max_views < len(stems):
+            stems = stems[:self.max_views] 
+
         anchor = stems[0]                                            # stored order: view 0 = anchor / target
 
         with _open_lmdb(self.lmdb_path).begin() as txn:
@@ -212,6 +217,7 @@ class ScannetPP_LDI(BaseDataset):
             "extrinsics": [v[4].astype(np.float32) for v in views],
             "image_names": list(stems),
         }
+
 
 
 # ======================================================================
@@ -250,7 +256,7 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
-    ds = ScannetPP_LDI(args.split, args.config_path,  lmdb_path=args.lmdb_path)
+    ds = ScannetPP_LDI(args.split, args.config_path,  max_views = 4, lmdb_path=args.lmdb_path)
     ds.training = False                                              # raw colours
     os.makedirs(args.out_dir, exist_ok=True)
     for i in range(min(args.num_samples, len(ds))):

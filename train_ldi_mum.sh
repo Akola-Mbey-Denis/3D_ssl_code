@@ -126,10 +126,10 @@ sbatch \
           --nproc_per_node=${NUM_GPUS} \
           --master_port=8794 \
           finetune_ldi.py \
-          --train_dataset=\"ScannetPP_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
-          --test_dataset=\"ScannetPP_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
+          --train_dataset=\"ScannetPP_LDI(split='train', max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
+          --test_dataset=\"ScannetPP_LDI(split='val', max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
           --model=\"mum_base_ldi(num_layers=4)\" \
-          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/mum_base_default_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
+          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/mum_base_random_masking_75_default_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
           --lr=1e-4 \
           --epochs=${EPOCHS} \
           --batch_size=64\

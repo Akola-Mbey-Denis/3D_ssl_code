@@ -16,6 +16,15 @@ from .muskie import muskie_large as muskie_large_downstream
 from .vistav3 import vista_base_v3 as  vista_basev3_downstream
 from.vistav3 import vista_large_v3 as vista_largev3_downstream
 
+from .vista_nvd import vista_nvd_base as vista_nvd_base_downstream 
+from .vista_nvd import vista_nvd_large as vista_nvd_large_downstream 
+
+from .mae_nvd import mae_nvd_base as mae_nvd_base_downstream
+from .mum_nvd import mum_nvd_base as mum_nvd_base_downstream
+from .muskie_nvd import muskie_nvd_base as muskie_nvd_base_downstream
+from .poincar3_nvd import poincar3_nvd as poincar3_nvd_large_downstream
+
+
 
 from .mae_ldi import mae_base_ldi
 from .mum_ldi import mum_base_ldi

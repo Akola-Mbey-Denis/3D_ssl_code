@@ -657,6 +657,70 @@ class VistaV2(nn.Module):
     # FULL FORWARD
     # ========================================================
 
+    # ========================================================
+    # RECONSTRUCTION FOR EVALUATION
+    # ========================================================
+
+    @torch.no_grad()
+    def reconstruct(self, images, view_masks, mode="query"):
+        """
+        Reconstruct a masked target view from clean source views (evaluation only).
+
+        images:     [B, V, 3, H, W] in [0, 1]. View 0 = target, views 1.. = clean sources (A).
+        view_masks: [B, V, P] bool, 1 = masked. Only view 0's mask is used; sources are clean.
+        mode:
+            "encoder" : target as a B view -> masked inside the encoder with the sources,
+                        recovered by the encoder-side linear head (encoder_pred).
+            "query"   : target as a C view -> never encoded; TargetEncoder embeds its visible
+                        patches, the decoder cross-attends to the source tokens, decoder_pred
+                        predicts the patches.
+
+        Returns: [B, 3, H, W] RGB in [0, 1]. Masked patches are the reconstruction,
+                 visible patches are copied from the input target.
+        """
+        B, V, C, H, W = images.shape
+        P = (H // self.patch_size) * (W // self.patch_size)
+        target, sources = images[:, :1], images[:, 1:]
+        t_mask = view_masks[:, 0].bool()                                     # [B, P]
+
+        if sources.shape[1] != self.num_clean:
+            raise ValueError(
+                f"reconstruct expects num_clean={self.num_clean} source views, got {sources.shape[1]}"
+            )
+
+        if mode == "encoder":
+            ref = torch.cat([sources, target], dim=1)                        # A (clean) + B (masked target)
+            tokens, psi = self.encoder(ref, t_mask[:, None])                 # [B, nc+1, psi+P, D]
+            pred = self.encoder_pred(self.encoder_norm(tokens[:, self.num_clean, psi:]))
+
+        elif mode == "query":
+            # Encoder sees only the clean sources (no B view): the target is never encoded.
+            empty = torch.zeros(B, 0, P, dtype=torch.bool, device=images.device)
+            tokens, psi = self.encoder(sources, empty)                       # [B, nc, psi+P, D]
+            t_tokens = self.target_encoder(target, t_mask)                   # [B, 1, P, D_dec]
+            out = self.decoder(
+                target_tokens=t_tokens,
+                reference_tokens=tokens,
+                patch_start_idx=psi,
+            ).reshape(B, P, -1)
+            pred = self.decoder_pred(self.decoder_norm(out))                 # [B, P, p*p*3]
+
+        else:
+            raise ValueError(f"mode must be 'encoder' or 'query', got '{mode}'")
+
+        # Patches -> RGB, same conversion as forward_loss
+        target_img = target[:, 0].float()                                    # [B, 3, H, W]
+        pred = pred.float()
+        if self.norm_pix_loss:
+            gt = self.patchify(target_img)
+            mean = gt.mean(dim=-1, keepdim=True)
+            std = torch.sqrt(gt.var(dim=-1, keepdim=True) + 1e-6)
+            pred_rgb = (pred * std + mean).clamp(0.0, 1.0)
+        else:
+            pred_rgb = pred.sigmoid()
+
+        return self.fill_masked_patches(target_img, t_mask, pred_rgb)       # [B, 3, H, W]
+
     def forward(self, reference_imgs, target_imgs, mask_ratio=None, mask_type=None):
         """
         reference_imgs: [B, S_ref, 3, H, W]

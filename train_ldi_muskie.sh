@@ -31,14 +31,14 @@ if (( GLOBAL_BATCH % NUM_GPUS != 0 )); then
     echo "Error: global batch ${GLOBAL_BATCH} is not divisible by ${NUM_GPUS} GPUs."
     exit 1
 fi
-BATCH_SIZE=$((GLOBAL_BATCH / NUM_GPUS))     # per GPU
+# BATCH_SIZE=$((GLOBAL_BATCH / NUM_GPUS))     # per GPU
 
 HOSTNAME=$(hostname)
 
 # ---------------------------
 # Set resources based on host
 # ---------------------------
-MAX_MEMORY=640         # GB
+MAX_MEMORY=320         # GB
 
 # Torch per-GPU share = node CPUs / GPUs and node memory / GPUs (more is rejected:
 # "GPU job setup is not valid")
@@ -100,7 +100,7 @@ echo "BATCH_SIZE = $BATCH_SIZE per GPU (global $GLOBAL_BATCH)"
 # ---------------------------
 # Submit SLURM job
 # ---------------------------
-mkdir -p muskie_ldi_training
+mkdir -p muskie_ldi_scannetpp_training
 
 sbatch \
   --account=torch_pr_41_courant \
@@ -111,8 +111,8 @@ sbatch \
   --constraint=${GPU_TYPE} \
   --job-name="muskie_ldi_scannetpp_${EPOCHS}ep_${GPU_TYPE}_${NUM_GPUS}gpu" \
   "${EXTRA_SBATCH[@]}" \
-  --output=muskie_ldi_scannetpptraining/%j.out \
-  --error=muskie_ldi_scannetpptraining/%j.err \
+  --output=muskie_ldi_scannetpp_training/%j.out \
+  --error=muskie_ldi_scannetpp_training/%j.err \
   --wrap="source /projects/rps/dff6142/fouheylab/dma9300/miniconda3/etc/profile.d/conda.sh && \
           conda activate mast3r && \
           cd /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/ && \
@@ -126,16 +126,16 @@ sbatch \
           --nproc_per_node=${NUM_GPUS} \
           --master_port=8794 \
           finetune_ldi.py \
-          --train_dataset=\"ScannetPP_LDI(split='train', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
-          --test_dataset=\"ScannetPP_LDI(split='val', config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
+          --train_dataset=\"ScannetPP_LDI(split='train',max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
+          --test_dataset=\"ScannetPP_LDI(split='val', max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')\" \
           --model=\"muskie_base_ldi(num_layers=4)\" \
           --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/muskie_base_default_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
           --lr=1e-4 \
           --epochs=${EPOCHS} \
-          --batch_size=64\
+          --batch_size=64 \
           --accum_iter=1 \
           --save_freq=1 \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/muskie_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_focal_loss_only_bs64_model_224_x_224_${EPOCHS}ep/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/muskie_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_bs64_correct_model_224_x_224_${EPOCHS}ep/\""
