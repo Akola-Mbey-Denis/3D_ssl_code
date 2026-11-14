@@ -268,6 +268,9 @@ def test_ss_3d_model(model: torch.nn.Module,
              loss_dict, b_masked_rgb, b_recon_rgb) = unpack_outputs(model(source_images, target_images))
 
         has_b = b_recon_rgb is not None and num_clean is not None
+        num_clean = (source_images.shape[1] - b_recon_rgb.shape[1] if b_recon_rgb is not None else None)
+        
+        has_b = b_recon_rgb is not None
 
         # ---------------------------------------------------
         # Target (C) reconstruction metrics

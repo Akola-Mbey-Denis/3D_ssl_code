@@ -72,6 +72,31 @@ fi
 SRC=/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/training_lmdbs   # LMDBs are copied from here to node-local disk
 
 # ---------------------------
+# LMDBs used by this job only (train + val of the datasets in --train_dataset / --test_dataset)
+# ---------------------------
+LMDB_NAMES=(
+    hypersim_resize
+    taskonomy_resize
+    replica_resize
+    matterport_resize
+    habitat_resize
+    scannet_resize
+    arkitscenes_resize
+    scannetpp
+)
+LMDB_FILES=""
+for name in "${LMDB_NAMES[@]}"; do
+    for split in train val; do
+        f="${SRC}/${name}_${split}.lmdb"
+        if [ ! -f "$f" ]; then
+            echo "Error: missing LMDB $f"
+            exit 1
+        fi
+        LMDB_FILES+=" $f"
+    done
+done
+
+# ---------------------------
 # Debug output
 # ---------------------------
 echo "Submitting downstream fine-tuning job with:"
@@ -81,6 +106,7 @@ echo "CPUS = $CPUS"
 echo "MEMORY = ${MEMORY}GB"
 echo "GRES = $GRES"
 echo "EPOCHS = $EPOCHS"
+echo "LMDBS  = $(du -ch $LMDB_FILES | tail -1 | cut -f1) in ${#LMDB_NAMES[@]} datasets (train + val)"
 [ ${#EXTRA_SBATCH[@]} -gt 0 ] && echo "EXTRA = ${EXTRA_SBATCH[*]}"
 
 # ---------------------------
@@ -89,7 +115,7 @@ echo "EPOCHS = $EPOCHS"
 
 sbatch \
   --account=torch_pr_41_courant \
-  --time=36:00:00 \
+  --time=12:00:00 \
   --mem=${MEMORY}G \
   --gres=${GRES} \
   --cpus-per-task=${CPUS} \
@@ -106,7 +132,7 @@ sbatch \
           trap 'rm -rf \$LMDB_DIR' EXIT && \
           echo \"start: \$(date)  restart count: \${SLURM_RESTART_COUNT:-0}\" && \
           mkdir -p \$LMDB_DIR && df -h \$LMDB_DIR && \
-          time cp ${SRC}/*.lmdb \$LMDB_DIR/ && \
+          time cp ${LMDB_FILES} \$LMDB_DIR/ && \
           torchrun \
           --nproc_per_node=${NUM_GPUS} \
           --master_port=8582 \

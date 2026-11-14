@@ -38,7 +38,7 @@ HOSTNAME=$(hostname)
 # ---------------------------
 # Set resources based on host
 # ---------------------------
-MAX_MEMORY=640         # GB
+MAX_MEMORY=320         # GB
 
 # Torch per-GPU share = node CPUs / GPUs and node memory / GPUs (more is rejected:
 # "GPU job setup is not valid")
@@ -80,7 +80,20 @@ else
 fi
 
 SRC=/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/ldi_lmdbs   # LDI LMDBs are copied from here to node-local disk
-LMDB_GLOB="scannetpp_*.lmdb"   # only the ScanNet++ LMDBs are needed (check the file names in \$SRC)
+# Only the ScanNet++ train + val LDI LMDBs are needed (no test, no other datasets)
+LMDB_NAMES=(
+    scannetpp_train_ldi_data.lmdb
+    scannetpp_val_ldi_data.lmdb
+)
+LMDB_FILES=""
+for name in "${LMDB_NAMES[@]}"; do
+    f="${SRC}/${name}"
+    if [ ! -f "$f" ]; then
+        echo "Error: missing LMDB $f"
+        exit 1
+    fi
+    LMDB_FILES+=" $f"
+done
 
 # ---------------------------
 # Debug output
@@ -92,15 +105,14 @@ echo "CPUS = $CPUS"
 echo "MEMORY = ${MEMORY}GB"
 echo "GRES = $GRES"
 echo "EPOCHS = $EPOCHS"
-echo "LMDBs = ${SRC}/${LMDB_GLOB}"
-ls ${SRC}/${LMDB_GLOB} >/dev/null 2>&1 || { echo "Error: no ${LMDB_GLOB} in ${SRC}"; exit 1; }
+echo "LMDBs = ${LMDB_NAMES[*]} ($(du -ch $LMDB_FILES | tail -1 | cut -f1))"
 echo "BATCH_SIZE = $BATCH_SIZE per GPU (global $GLOBAL_BATCH)"
 [ ${#EXTRA_SBATCH[@]} -gt 0 ] && echo "EXTRA = ${EXTRA_SBATCH[*]}"
 
 # ---------------------------
 # Submit SLURM job
 # ---------------------------
-mkdir -p vista_ldi_training
+mkdir -p vista_ldi_scannetpptraining
 
 sbatch \
   --account=torch_pr_41_courant \
@@ -121,7 +133,7 @@ sbatch \
           trap 'rm -rf \$LMDB_DIR' EXIT && \
           echo \"start: \$(date)  restart count: \${SLURM_RESTART_COUNT:-0}\" && \
           mkdir -p \$LMDB_DIR && df -h \$LMDB_DIR && \
-          time cp ${SRC}/${LMDB_GLOB} \$LMDB_DIR/ && \
+          time cp ${LMDB_FILES} \$LMDB_DIR/ && \
           torchrun \
           --nproc_per_node=${NUM_GPUS} \
           --master_port=8894 \

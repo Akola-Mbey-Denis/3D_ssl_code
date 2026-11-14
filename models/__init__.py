@@ -1,5 +1,6 @@
 from .model import vista_base, vista_small, vista_large
 from .modelv2 import vista_v2_base, vista_v2_large, vista_v2_small
+from .vista_baseline import vista_baseline_base, vista_baseline_large
 from .modelv3 import vista_v3_base, vista_v3_large
 # from .model_depth import MuMCrossViewAutoEncoder_DPT
 from .vista_decoders import  VistaDecoders

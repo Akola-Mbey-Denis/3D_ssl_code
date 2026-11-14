@@ -26,7 +26,7 @@ HOSTNAME=$(hostname)
 # ---------------------------
 # Set resources based on host
 # ---------------------------
-MAX_MEMORY=512          # GB
+MAX_MEMORY=720          # GB
 
 # Torch per-GPU share = node CPUs / GPUs and node memory / GPUs (more is rejected:
 # "GPU job setup is not valid")
@@ -91,7 +91,7 @@ sbatch \
   --gres=${GRES} \
   --cpus-per-task=${CPUS} \
   --constraint=${GPU_TYPE} \
-  --job-name="vista_${GPU_TYPE}_${NUM_GPUS}gpu" \
+  --job-name="L_vista_${GPU_TYPE}_${NUM_GPUS}gpu" \
   "${EXTRA_SBATCH[@]}" \
   --output=vistav2_ssl_training/%j.out \
   --error=vistav2_ssl_training/%j.err \

@@ -575,14 +575,14 @@ class EncoderV2(nn.Module):
         init_values: float = 0.01,
         cached_layer_indices: Tuple[int, ...] = (3, 5, 7, 11),
         use_reentrant: bool = False,
-        num_clean: int = 4,
+        # num_clean: int = 4,
     ):
         super().__init__()
 
-        if num_clean < 1:
-            raise ValueError(f"num_clean must be >= 1, got {num_clean}")
+        # if num_clean < 1:
+        #     raise ValueError(f"num_clean must be >= 1, got {num_clean}")
 
-        self.num_clean = num_clean
+        # self.num_clean = num_clean
         self.depth = depth
         self.patch_size = patch_size
         self.n_storage_tokens = n_storage_tokens
@@ -664,14 +664,25 @@ class EncoderV2(nn.Module):
             If return_intermediate_outputs=True:
                 list of [B, S, P, 2C], patch_start_idx
         """
+        # B, S, C_in, H, W = images.shape
+        # if C_in != 3:
+        #     raise ValueError(f"Expected 3 input channels, got {C_in}")
+
+        # num_clean = S if mask is None else self.num_clean
+        # S_m = S - num_clean
+        # if mask is not None and not 0 < num_clean < S:
+        #     raise ValueError(f"Got {S} views but num_clean={num_clean}; need at least one masked view")
+
         B, S, C_in, H, W = images.shape
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
-        num_clean = S if mask is None else self.num_clean
-        S_m = S - num_clean
-        if mask is not None and not 0 < num_clean < S:
-            raise ValueError(f"Got {S} views but num_clean={num_clean}; need at least one masked view")
+        if mask is None:
+            num_clean = S
+            S_m = 0
+        else:
+            S_m = mask.shape[1]
+            num_clean = S - S_m
 
         # Patch embedding
         x = self.patch_embed(images.reshape(B * S, C_in, H, W))  # [B*S, N, C]

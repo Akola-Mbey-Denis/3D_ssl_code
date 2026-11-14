@@ -165,15 +165,23 @@ def parse_args():
 
 
 # =============================================================================
-# Model loading + forward  (ADAPT HERE if your interface differs)
-# =============================================================================
 def resolve_ckpt(ckpt, root):
-    """--ckpt -> weights file. Accepts a file, a folder path, or a folder name under `root`.
-    In a folder: a file named final/last wins, else the highest step/epoch number in the name,
-    else the newest file. Searches the folder itself first, then its subfolders."""
+    """--ckpt -> weights file. Accepts a file, folder, or folder name under root.
+
+    In a folder, priority:
+      1. best
+      2. final
+      3. last/latest
+      4. highest step/epoch number
+      5. newest file
+
+    Searches the folder itself first, then subfolders if necessary.
+    """
     import re
+
     if ckpt is None:
         return None
+
     for cand in (ckpt, osp.join(root, ckpt)):
         if osp.isfile(cand):
             return osp.abspath(cand)
@@ -181,32 +189,84 @@ def resolve_ckpt(ckpt, root):
             folder = cand
             break
     else:
-        raise SystemExit(f"--ckpt '{ckpt}' is neither a file nor a folder (also looked in {root})")
+        raise SystemExit(
+            f"--ckpt '{ckpt}' is neither a file nor a folder "
+            f"(also looked in {root})"
+        )
 
-    files = [osp.join(folder, f) for f in os.listdir(folder) if f.endswith(CKPT_EXTS)]
-    if not files:  # e.g. run/checkpoints/*.pth
-        files = [osp.join(d, f) for d, _, fs in os.walk(folder) for f in fs if f.endswith(CKPT_EXTS)]
+    files = [
+        osp.join(folder, f)
+        for f in os.listdir(folder)
+        if f.endswith(CKPT_EXTS)
+    ]
+
     if not files:
-        raise SystemExit(f"no weights ({', '.join(CKPT_EXTS)}) found in {folder}")
+        files = [
+            osp.join(d, f)
+            for d, _, fs in os.walk(folder)
+            for f in fs
+            if f.endswith(CKPT_EXTS)
+        ]
+
+    if not files:
+        raise SystemExit(
+            f"no weights ({', '.join(CKPT_EXTS)}) found in {folder}"
+        )
 
     def stem(f):
         return osp.splitext(osp.basename(f))[0].lower()
 
-    named = [f for f in files if re.search(r"(^|[-_.])(final|last|latest)([-_.]|$)", stem(f))]
-    if named:
-        named.sort(key=lambda f: ("final" not in stem(f), -os.path.getmtime(f)))  # final > last/latest > newest
-        choice, why = named[0], "named final/last"
-    else:
-        numbered = [(int(re.findall(r"\d+", stem(f))[-1]), f) for f in files if re.findall(r"\d+", stem(f))]
-        if numbered:
-            choice, why = max(numbered)[1], "highest step/epoch"
-        else:
-            choice, why = max(files, key=os.path.getmtime), "newest file"
-    others = sorted(osp.relpath(f, folder) for f in files if f != choice)
-    logger.info(f"--ckpt {ckpt} -> {choice} ({why})"
-                + (f"; other weights there: {others[:6]}{' ...' if len(others) > 6 else ''}" if others else ""))
-    return osp.abspath(choice)
+    # Prefer explicitly named best checkpoints.
+    best = [f for f in files if re.search(r"(^|[-_.])best([-_.]|$)", stem(f))]
 
+    if best:
+        choice = max(best, key=os.path.getmtime)
+        why = "named best"
+
+    else:
+        named = [
+            f for f in files
+            if re.search(r"(^|[-_.])(final|last|latest)([-_.]|$)", stem(f))
+        ]
+
+        if named:
+            named.sort(
+                key=lambda f: (
+                    "final" not in stem(f),
+                    -os.path.getmtime(f),
+                )
+            )
+            choice = named[0]
+            why = "named final/last"
+
+        else:
+            numbered = [
+                (int(re.findall(r"\d+", stem(f))[-1]), f)
+                for f in files
+                if re.findall(r"\d+", stem(f))
+            ]
+
+            if numbered:
+                choice = max(numbered)[1]
+                why = "highest step/epoch"
+            else:
+                choice = max(files, key=os.path.getmtime)
+                why = "newest file"
+
+    others = sorted(
+        osp.relpath(f, folder) for f in files if f != choice
+    )
+
+    logger.info(
+        f"--ckpt {ckpt} -> {choice} ({why})"
+        + (
+            f"; other weights there: {others[:6]}"
+            f"{' ...' if len(others) > 6 else ''}"
+            if others else ""
+        )
+    )
+
+    return osp.abspath(choice)
 
 def ckpt_run_name(ckpt, root):
     """Default --model_name: the run folder name (or the file's parent folder)."""

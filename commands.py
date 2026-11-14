@@ -243,7 +243,7 @@ python finetune_ldi.py --train_dataset="ScanNet_LDI(split='train', overfit=True,
 python train_sslv2.py  \
   --train_dataset "Hypersim_NVS(split='train', overfit=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" \
   --test_dataset  "Hypersim_NVS(split='val', overfit=True, n_target_views=2, max_views =6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml')" \
-  --model "vista_v2_base(lambda_b=1.0, decoder_depth=2)" \ 
+  --model "vista_v2_base(lambda_b=1.0)" \ 
   --lr 2e-4 \
   --epochs 1000 \
   --batch_size 8 \

@@ -3,13 +3,13 @@
 Dump SSL-downstream predictions (depth + camera heads) for figures.
 
 Per sample, all views (targets first, then sources, as in eval_ssl.py):
-  <out_dir>/<model_name>/images/<name>.png                      RGB of the view
-  <out_dir>/<model_name>/depthmaps/<name>_gt_depth.png          GT depth
-  <out_dir>/<model_name>/depthmaps/<name>_pred_depth.png        predicted depth (scale-aligned to GT, same colours)
-  <out_dir>/<model_name>/point_maps/<name>_gt_pointmap.glb      GT point map of the view
-  <out_dir>/<model_name>/point_maps/<name>_pred_pointmap.glb    predicted point map of the view (Sim(3)-aligned to GT)
-  <out_dir>/<model_name>/point_clouds/<sample>_gt_pointcloud.glb    all GT point maps of the sample
-  <out_dir>/<model_name>/point_clouds/<sample>_pred_pointcloud.glb  all aligned predicted point maps of the sample
+  <out_dir>/<model_name>/images/<model_name>_<name>.png                                 RGB of the view
+  <out_dir>/<model_name>/depthmaps/<model_name>_<name>_gt_depth.png                     GT depth
+  <out_dir>/<model_name>/depthmaps/<model_name>_<name>_pred_depth.png                   predicted depth (scale-aligned to GT, same colours)
+  <out_dir>/<model_name>/point_maps/<model_name>_per_view_<name>_gt_pointmap.glb        GT point map of the view
+  <out_dir>/<model_name>/point_maps/<model_name>_per_view_<name>_pred_pointmap.glb      predicted point map of the view (Sim(3)-aligned to GT)
+  <out_dir>/<model_name>/point_clouds/<model_name>_combined_<sample>_gt_pointcloud.glb    all GT point maps of the sample
+  <out_dir>/<model_name>/point_clouds/<model_name>_combined_<sample>_pred_pointcloud.glb  all aligned predicted point maps of the sample
   <name> = <sample>_<image name>, <sample> = <dataset>_<index>_<sequence>
 
 Depth maps: predicted depth scale-aligned to GT per view (masked IRLS).
@@ -138,7 +138,7 @@ def save_ply(path, pts, rgb):
 def save_cloud(path_no_ext, pts, rgb):
     """Writes <path>.glb and <path>.ply."""
     save_glb(path_no_ext + ".glb", pts, rgb)
-    save_ply(path_no_ext + ".ply", pts, rgb)
+    # save_ply(path_no_ext + ".ply", pts, rgb)
 
 
 def clean(s):
@@ -161,14 +161,15 @@ def view_names(batch, prefix, n):
     return [f"{'tgt' if prefix == 't_' else 'src'}{i:02d}" for i in range(n)]
 
 
-def dump_sample(root, sample, names, rgb, gt_depth, gt_mask, pred_depth, gt_pts, pred_pts):
+def dump_sample(root, model_name, sample, names, rgb, gt_depth, gt_mask, pred_depth, gt_pts, pred_pts):
     """Writes images, GT / predicted depth, per-view point maps and the combined point map of one sample.
+    Every file name starts with <model_name>_.
     rgb (V,H,W,3) uint8, depths (V,H,W), gt_mask (V,H,W) bool, *_pts (V,H,W,3) in the GT world frame."""
     for d in ("images", "depthmaps", "point_maps", "point_clouds"):
         os.makedirs(osp.join(root, d), exist_ok=True)
     all_gt, all_pred = [], []
     for v, n in enumerate(names):
-        name = f"{sample}_{n}"
+        name = f"{model_name}_{sample}_{n}"
         m = gt_mask[v]
         pred_ok = m & np.isfinite(pred_pts[v]).all(-1)
         Image.fromarray(rgb[v]).save(osp.join(root, "images", f"{name}.png"))
@@ -183,14 +184,14 @@ def dump_sample(root, sample, names, rgb, gt_depth, gt_mask, pred_depth, gt_pts,
 
 
         # per-view point maps, coloured with the RGB image
-        save_cloud(osp.join(root, "point_maps", f"per_view_{name}_gt_pointmap"), gt_pts[v][m], rgb[v][m])
-        save_cloud(osp.join(root, "point_maps", f"per_view_{name}_pred_pointmap"), pred_pts[v][pred_ok], rgb[v][pred_ok])
+        save_cloud(osp.join(root, "point_maps", f"{model_name}_per_view_{sample}_{n}_gt_pointmap"), gt_pts[v][m], rgb[v][m])
+        save_cloud(osp.join(root, "point_maps", f"{model_name}_per_view_{sample}_{n}_pred_pointmap"), pred_pts[v][pred_ok], rgb[v][pred_ok])
         all_gt.append((gt_pts[v][m], rgb[v][m]))
         all_pred.append((pred_pts[v][pred_ok], rgb[v][pred_ok]))
 
     # combined point maps of the sample (all views)
     for who, parts in (("gt", all_gt), ("pred", all_pred)):
-        save_cloud(osp.join(root, "point_clouds", f"combined_{sample}_{who}_pointcloud"),
+        save_cloud(osp.join(root, "point_clouds", f"{model_name}_combined_{sample}_{who}_pointcloud"),
                  np.concatenate([q for q, _ in parts]), np.concatenate([c for _, c in parts]))
 
 
@@ -323,7 +324,7 @@ def main():
     root = osp.join(args.out_dir, args.model_name)
     for sample, batch in iterate(args.dataset, args.indices, args.num_workers):
         names, rgb, gt_depth, gt_mask, pred_depth_aligned, gt_pts, pred_pts =  predict(model, batch, device)
-        dump_sample(root, sample, names=names, rgb=rgb, gt_depth=gt_depth, gt_mask=gt_mask,
+        dump_sample(root, args.model_name, sample, names=names, rgb=rgb, gt_depth=gt_depth, gt_mask=gt_mask,
                     pred_depth=pred_depth_aligned, gt_pts=gt_pts, pred_pts=pred_pts)
         print(sample)
     print("done ->", root)

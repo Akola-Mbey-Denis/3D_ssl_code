@@ -197,7 +197,7 @@ class VistaV2(nn.Module):
         embed_dim=1024,
         encoder_depth=24,
         encoder_num_heads=16,
-        num_clean=2,
+        # num_clean=2,
 
         # ====================================================
         # Target encoder (C, self-attention)
@@ -250,7 +250,7 @@ class VistaV2(nn.Module):
         self.embed_dim = embed_dim
         self.decoder_embed_dim = decoder_embed_dim
         self.n_storage_tokens = n_storage_tokens
-        self.num_clean = num_clean
+        # self.num_clean = num_clean
         self.lambda_b = lambda_b
 
         assert len(masking_types) == len(mask_ratios), "need one mask ratio per masking type"
@@ -273,7 +273,7 @@ class VistaV2(nn.Module):
             num_heads=encoder_num_heads,
             n_storage_tokens=n_storage_tokens,
             rope_freq=rope_freq,
-            num_clean=num_clean,
+            # num_clean=num_clean,
         )
 
         # ====================================================
@@ -661,113 +661,145 @@ class VistaV2(nn.Module):
     # RECONSTRUCTION FOR EVALUATION
     # ========================================================
 
-    @torch.no_grad()
-    def reconstruct(self, images, view_masks, mode="query"):
-        """
-        Reconstruct a masked target view from clean source views (evaluation only).
 
-        images:     [B, V, 3, H, W] in [0, 1]. View 0 = target, views 1.. = clean sources (A).
-        view_masks: [B, V, P] bool, 1 = masked. Only view 0's mask is used; sources are clean.
-        mode:
-            "encoder" : target as a B view -> masked inside the encoder with the sources,
-                        recovered by the encoder-side linear head (encoder_pred).
-            "query"   : target as a C view -> never encoded; TargetEncoder embeds its visible
-                        patches, the decoder cross-attends to the source tokens, decoder_pred
-                        predicts the patches.
+    # def forward(self, reference_imgs, target_imgs, mask_ratio=None, mask_type=None):
+    #     """
+    #     reference_imgs: [B, S_ref, 3, H, W]
+    #                     [:, :num_clean]  A, clean
+    #                     [:, num_clean:]  B, masked inside the encoder
+    #     target_imgs:    [B, S_target, 3, H, W]   C
+    #     mask_ratio:     optional fixed ratio for B and C (e.g. evaluation)
+    #     mask_type:      optional fixed strategy for B and C (e.g. evaluation)
 
-        Returns: [B, 3, H, W] RGB in [0, 1]. Masked patches are the reconstruction,
-                 visible patches are copied from the input target.
-        """
-        B, V, C, H, W = images.shape
-        P = (H // self.patch_size) * (W // self.patch_size)
-        target, sources = images[:, :1], images[:, 1:]
-        t_mask = view_masks[:, 0].bool()                                     # [B, P]
+    #     Returns:
+    #         loss:              total loss = loss_c + lambda_b * loss_b
+    #         masked_rgb:        C with masked patches in white      [B, S_target, 3, H, W]  (None in training)
+    #         reconstructed_rgb: C decoder reconstruction            [B, S_target, 3, H, W]  (None in training)
+    #         loss_dict:         {"loss_b": ..., "loss_c": ...}      (detached, for logging)
+    #         b_masked_rgb:      B with masked patches in white      [B, S_masked, 3, H, W]  (None in training / lambda_b=0)
+    #         b_recon_rgb:       B encoder reconstruction            [B, S_masked, 3, H, W]  (None in training / lambda_b=0)
+    #     """
+    #     B, S_ref = reference_imgs.shape[:2]
+    #     _, S_target, C, H, W = target_imgs.shape
+    #     assert target_imgs.shape[0] == B
+    #     assert S_ref > self.num_clean, (
+    #         f"need at least one masked reference view: S_ref={S_ref}, num_clean={self.num_clean}"
+    #     )
 
-        if sources.shape[1] != self.num_clean:
-            raise ValueError(
-                f"reconstruct expects num_clean={self.num_clean} source views, got {sources.shape[1]}"
-            )
+    #     P = (H // self.patch_size) * (W // self.patch_size)
+    #     S_masked = S_ref - self.num_clean
 
-        if mode == "encoder":
-            ref = torch.cat([sources, target], dim=1)                        # A (clean) + B (masked target)
-            tokens, psi = self.encoder(ref, t_mask[:, None])                 # [B, nc+1, psi+P, D]
-            pred = self.encoder_pred(self.encoder_norm(tokens[:, self.num_clean, psi:]))
+    #     # 1. Mask B (reference views after the first num_clean)
+    #     ref_mask = self.sample_mask(
+    #         B * S_masked, P, reference_imgs.device,
+    #         mask_ratio=mask_ratio, mask_type=mask_type,
+    #     )                                                                        # [B*S_masked, P]
 
-        elif mode == "query":
-            # Encoder sees only the clean sources (no B view): the target is never encoded.
-            empty = torch.zeros(B, 0, P, dtype=torch.bool, device=images.device)
-            tokens, psi = self.encoder(sources, empty)                       # [B, nc, psi+P, D]
-            t_tokens = self.target_encoder(target, t_mask)                   # [B, 1, P, D_dec]
-            out = self.decoder(
-                target_tokens=t_tokens,
-                reference_tokens=tokens,
-                patch_start_idx=psi,
-            ).reshape(B, P, -1)
-            pred = self.decoder_pred(self.decoder_norm(out))                 # [B, P, p*p*3]
+    #     # 2. Encode A + B jointly; tokens of all reference views
+    #     reference_tokens, patch_start_idx = self.encoder(
+    #         reference_imgs, ref_mask.reshape(B, S_masked, P).bool()
+    #     )                                                                        # [B, S_ref, psi + P, D]
 
-        else:
-            raise ValueError(f"mode must be 'encoder' or 'query', got '{mode}'")
+    #     # 3. B reconstruction loss from B's encoder tokens
+    #     loss_b = torch.zeros((), device=reference_imgs.device)
+    #     b_masked_rgb = b_recon_rgb = None
+    #     if self.lambda_b > 0:
+    #         b_tokens = reference_tokens[:, self.num_clean:, patch_start_idx:]     # [B, S_masked, P, D]
+    #         pred_b = self.encoder_pred(self.encoder_norm(b_tokens)).reshape(B * S_masked, P, -1)
+    #         with torch.autocast(device_type=pred_b.device.type, enabled=False):
+    #             loss_b, b_masked_rgb, b_recon_rgb = self.forward_loss(
+    #                 reference_imgs[:, self.num_clean:].reshape(B * S_masked, C, H, W).float(),
+    #                 pred_b.float(),
+    #                 ref_mask.float(),
+    #             )
 
-        # Patches -> RGB, same conversion as forward_loss
-        target_img = target[:, 0].float()                                    # [B, 3, H, W]
-        pred = pred.float()
-        if self.norm_pix_loss:
-            gt = self.patchify(target_img)
-            mean = gt.mean(dim=-1, keepdim=True)
-            std = torch.sqrt(gt.var(dim=-1, keepdim=True) + 1e-6)
-            pred_rgb = (pred * std + mean).clamp(0.0, 1.0)
-        else:
-            pred_rgb = pred.sigmoid()
+    #     # 4. Mask C
+    #     mask = self.sample_mask(
+    #         B * S_target, P, target_imgs.device,
+    #         mask_ratio=mask_ratio, mask_type=mask_type,
+    #     )                                                                        # [B*S_target, P]
 
-        return self.fill_masked_patches(target_img, t_mask, pred_rgb)       # [B, 3, H, W]
+    #     # 5. Target encoder: patch embed + mask tokens + self-attention
+    #     target_tokens = self.target_encoder(target_imgs, mask)                  # [B, S_target, P, D_dec]
+
+    #     # 6. Decoder: C cross-attends to A + B tokens
+    #     decoder_out = self.decoder(
+    #         target_tokens=target_tokens,
+    #         reference_tokens=reference_tokens,
+    #         patch_start_idx=patch_start_idx,
+    #     ).reshape(B * S_target, P, -1)
+
+    #     pred = self.decoder_pred(self.decoder_norm(decoder_out))                # [B*S_target, P, p*p*3]
+
+    #     # 7. C reconstruction loss
+    #     with torch.autocast(device_type=pred.device.type, enabled=False):
+    #         loss_c, masked_rgb, reconstructed_rgb = self.forward_loss(
+    #             target_imgs.reshape(B * S_target, C, H, W).float(),
+    #             pred.float(),
+    #             mask.float(),
+    #         )
+
+    #     # 8. Total loss + per-term losses for logging
+    #     loss = loss_c + self.lambda_b * loss_b
+    #     loss_dict = {"loss_b": loss_b.detach(), "loss_c": loss_c.detach()}
+
+    #     # 9. Visualisations (None during training)
+    #     if masked_rgb is not None:
+    #         masked_rgb = masked_rgb.reshape(B, S_target, 3, H, W)
+    #         reconstructed_rgb = reconstructed_rgb.reshape(B, S_target, 3, H, W)
+
+    #     if b_masked_rgb is not None:
+    #         b_masked_rgb = b_masked_rgb.reshape(B, S_masked, 3, H, W)
+    #         b_recon_rgb = b_recon_rgb.reshape(B, S_masked, 3, H, W)
+
+    #     return loss, masked_rgb, reconstructed_rgb, loss_dict, b_masked_rgb, b_recon_rgb
 
     def forward(self, reference_imgs, target_imgs, mask_ratio=None, mask_type=None):
         """
         reference_imgs: [B, S_ref, 3, H, W]
-                        [:, :num_clean]  A, clean
-                        [:, num_clean:]  B, masked inside the encoder
-        target_imgs:    [B, S_target, 3, H, W]   C
-        mask_ratio:     optional fixed ratio for B and C (e.g. evaluation)
-        mask_type:      optional fixed strategy for B and C (e.g. evaluation)
+        target_imgs:    [B, S_target, 3, H, W]
 
-        Returns:
-            loss:              total loss = loss_c + lambda_b * loss_b
-            masked_rgb:        C with masked patches in white      [B, S_target, 3, H, W]  (None in training)
-            reconstructed_rgb: C decoder reconstruction            [B, S_target, 3, H, W]  (None in training)
-            loss_dict:         {"loss_b": ..., "loss_c": ...}      (detached, for logging)
-            b_masked_rgb:      B with masked patches in white      [B, S_masked, 3, H, W]  (None in training / lambda_b=0)
-            b_recon_rgb:       B encoder reconstruction            [B, S_masked, 3, H, W]  (None in training / lambda_b=0)
+        Randomly selects num_clean reference views per batch.
+        First num_clean views are clean (A); remaining views are masked (B).
         """
         B, S_ref = reference_imgs.shape[:2]
         _, S_target, C, H, W = target_imgs.shape
         assert target_imgs.shape[0] == B
-        assert S_ref > self.num_clean, (
-            f"need at least one masked reference view: S_ref={S_ref}, num_clean={self.num_clean}"
+
+        # Random Muskie-style reference-view selection.
+        num_clean = random.randint(max(1, S_ref // 4), max(1, S_ref // 2))
+
+        assert S_ref > num_clean, (
+            f"need at least one masked reference view: S_ref={S_ref}, num_clean={num_clean}"
         )
 
         P = (H // self.patch_size) * (W // self.patch_size)
-        S_masked = S_ref - self.num_clean
+        S_masked = S_ref - num_clean
 
         # 1. Mask B (reference views after the first num_clean)
         ref_mask = self.sample_mask(
             B * S_masked, P, reference_imgs.device,
             mask_ratio=mask_ratio, mask_type=mask_type,
-        )                                                                        # [B*S_masked, P]
+        )
 
-        # 2. Encode A + B jointly; tokens of all reference views
+        # 2. Encode A + B jointly
         reference_tokens, patch_start_idx = self.encoder(
             reference_imgs, ref_mask.reshape(B, S_masked, P).bool()
-        )                                                                        # [B, S_ref, psi + P, D]
+        )
 
-        # 3. B reconstruction loss from B's encoder tokens
+        # 3. B reconstruction loss
         loss_b = torch.zeros((), device=reference_imgs.device)
         b_masked_rgb = b_recon_rgb = None
+
         if self.lambda_b > 0:
-            b_tokens = reference_tokens[:, self.num_clean:, patch_start_idx:]     # [B, S_masked, P, D]
-            pred_b = self.encoder_pred(self.encoder_norm(b_tokens)).reshape(B * S_masked, P, -1)
+            b_tokens = reference_tokens[:, num_clean:, patch_start_idx:]
+            pred_b = self.encoder_pred(self.encoder_norm(b_tokens)).reshape(
+                B * S_masked, P, -1
+            )
+
             with torch.autocast(device_type=pred_b.device.type, enabled=False):
                 loss_b, b_masked_rgb, b_recon_rgb = self.forward_loss(
-                    reference_imgs[:, self.num_clean:].reshape(B * S_masked, C, H, W).float(),
+                    reference_imgs[:, num_clean:].reshape(B * S_masked, C, H, W).float(),
                     pred_b.float(),
                     ref_mask.float(),
                 )
@@ -776,19 +808,19 @@ class VistaV2(nn.Module):
         mask = self.sample_mask(
             B * S_target, P, target_imgs.device,
             mask_ratio=mask_ratio, mask_type=mask_type,
-        )                                                                        # [B*S_target, P]
+        )
 
-        # 5. Target encoder: patch embed + mask tokens + self-attention
-        target_tokens = self.target_encoder(target_imgs, mask)                  # [B, S_target, P, D_dec]
+        # 5. Target encoder
+        target_tokens = self.target_encoder(target_imgs, mask)
 
-        # 6. Decoder: C cross-attends to A + B tokens
+        # 6. Decoder
         decoder_out = self.decoder(
             target_tokens=target_tokens,
             reference_tokens=reference_tokens,
             patch_start_idx=patch_start_idx,
         ).reshape(B * S_target, P, -1)
 
-        pred = self.decoder_pred(self.decoder_norm(decoder_out))                # [B*S_target, P, p*p*3]
+        pred = self.decoder_pred(self.decoder_norm(decoder_out))
 
         # 7. C reconstruction loss
         with torch.autocast(device_type=pred.device.type, enabled=False):
@@ -798,11 +830,11 @@ class VistaV2(nn.Module):
                 mask.float(),
             )
 
-        # 8. Total loss + per-term losses for logging
+        # 8. Total loss
         loss = loss_c + self.lambda_b * loss_b
         loss_dict = {"loss_b": loss_b.detach(), "loss_c": loss_c.detach()}
 
-        # 9. Visualisations (None during training)
+        # 9. Visualisations
         if masked_rgb is not None:
             masked_rgb = masked_rgb.reshape(B, S_target, 3, H, W)
             reconstructed_rgb = reconstructed_rgb.reshape(B, S_target, 3, H, W)
