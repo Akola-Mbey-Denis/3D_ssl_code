@@ -1,9 +1,9 @@
 #!/bin/bash
 
-GPU_TYPE="h200"
+GPU_TYPE="b200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
-EPOCHS=70
+EPOCHS=40
 
 # ---------------------------
 # Parse flags
@@ -71,6 +71,29 @@ fi
 
 SRC=/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/training_lmdbs   # LMDBs are copied from here to node-local disk
 
+# Only the LMDBs used by --train_dataset / --test_dataset below (train + val splits)
+LMDB_NAMES=(
+    hypersim_resize
+    taskonomy_resize
+    replica_resize
+    matterport_resize
+    habitat_resize
+    scannet_resize
+    arkitscenes_resize
+    scannetpp
+)
+LMDB_FILES=""
+for name in "${LMDB_NAMES[@]}"; do
+    for split in train val; do
+        f="${SRC}/${name}_${split}.lmdb"
+        if [ ! -f "$f" ]; then
+            echo "Error: missing LMDB $f"
+            exit 1
+        fi
+        LMDB_FILES+=" $f"
+    done
+done
+
 # ---------------------------
 # Debug output
 # ---------------------------
@@ -81,6 +104,7 @@ echo "CPUS = $CPUS"
 echo "MEMORY = ${MEMORY}GB"
 echo "GRES = $GRES"
 echo "EPOCHS = $EPOCHS"
+echo "LMDBS  = $(du -ch $LMDB_FILES | tail -1 | cut -f1) in ${#LMDB_NAMES[@]} datasets (train + val)"
 [ ${#EXTRA_SBATCH[@]} -gt 0 ] && echo "EXTRA = ${EXTRA_SBATCH[*]}"
 
 # ---------------------------
@@ -89,7 +113,7 @@ echo "EPOCHS = $EPOCHS"
 
 sbatch \
   --account=torch_pr_41_courant \
-  --time=36:00:00 \
+  --time=24:00:00 \
   --mem=${MEMORY}G \
   --gres=${GRES} \
   --cpus-per-task=${CPUS} \
@@ -106,13 +130,13 @@ sbatch \
           trap 'rm -rf \$LMDB_DIR' EXIT && \
           echo \"start: \$(date)  restart count: \${SLURM_RESTART_COUNT:-0}\" && \
           mkdir -p \$LMDB_DIR && df -h \$LMDB_DIR && \
-          time cp ${SRC}/*.lmdb \$LMDB_DIR/ && \
+          time cp ${LMDB_FILES} \$LMDB_DIR/ && \
           torchrun \
           --nproc_per_node=${NUM_GPUS} \
-          --master_port=8580 \
+          --master_port=8780 \
           finetune_multitask.py \
-          --train_dataset=\"Hypersim_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + Matterport3D_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + 100_000 @ Habitat_HM3D_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + 100_000 @ ScanNet_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + 70_000 @ Arkitscenes_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml')\" \
-          --test_dataset=\"Hypersim_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + Matterport3D_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + Habitat_HM3D_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + ScanNet_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + Arkitscenes_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=6, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml')\" \
+          --train_dataset=\"Hypersim_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + Matterport3D_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + 100_000 @ Habitat_HM3D_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + 100_000 @ ScanNet_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + 70_000 @ Arkitscenes_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml') + 100_000 @ ScanNetPP_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')\" \
+          --test_dataset=\"Hypersim_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + Matterport3D_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + Habitat_HM3D_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + ScanNet_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + Arkitscenes_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml') + ScanNetPP_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')\" \
           --model=\"vista_basev3_downstream()\" \
           --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_v3_full_loss_b_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
           --lr=2e-4 \
@@ -123,4 +147,4 @@ sbatch \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav3_conf_loss_l1_loss_patch_tokens_pose_base_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep_latest/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav3_conf_scene_norm_loss_l1_loss_patch_tokens_pose_base_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep_latest/\""

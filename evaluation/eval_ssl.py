@@ -169,11 +169,12 @@ def resolve_ckpt(ckpt, root):
     """--ckpt -> weights file. Accepts a file, folder, or folder name under root.
 
     In a folder, priority:
-      1. best
-      2. final
-      3. last/latest
-      4. highest step/epoch number
-      5. newest file
+      1. final
+      2. last/latest
+      3. highest step/epoch number
+      4. newest file
+    ('best' is never chosen automatically: the training script's best criterion is unreliable.
+     Pass the best file explicitly if you want it.)
 
     Searches the folder itself first, then subfolders if necessary.
     """
@@ -216,42 +217,35 @@ def resolve_ckpt(ckpt, root):
     def stem(f):
         return osp.splitext(osp.basename(f))[0].lower()
 
-    # Prefer explicitly named best checkpoints.
-    best = [f for f in files if re.search(r"(^|[-_.])best([-_.]|$)", stem(f))]
+    named = [
+        f for f in files
+        if re.search(r"(^|[-_.])(final|last|latest)([-_.]|$)", stem(f))
+    ]
 
-    if best:
-        choice = max(best, key=os.path.getmtime)
-        why = "named best"
+    if named:
+        named.sort(
+            key=lambda f: (
+                "final" not in stem(f),
+                -os.path.getmtime(f),
+            )
+        )
+        choice = named[0]
+        why = "named final/last"
 
     else:
-        named = [
-            f for f in files
-            if re.search(r"(^|[-_.])(final|last|latest)([-_.]|$)", stem(f))
+        numbered = [
+            (int(re.findall(r"\d+", stem(f))[-1]), f)
+            for f in files
+            if re.findall(r"\d+", stem(f)) and "best" not in stem(f)
         ]
 
-        if named:
-            named.sort(
-                key=lambda f: (
-                    "final" not in stem(f),
-                    -os.path.getmtime(f),
-                )
-            )
-            choice = named[0]
-            why = "named final/last"
-
+        if numbered:
+            choice = max(numbered)[1]
+            why = "highest step/epoch"
         else:
-            numbered = [
-                (int(re.findall(r"\d+", stem(f))[-1]), f)
-                for f in files
-                if re.findall(r"\d+", stem(f))
-            ]
-
-            if numbered:
-                choice = max(numbered)[1]
-                why = "highest step/epoch"
-            else:
-                choice = max(files, key=os.path.getmtime)
-                why = "newest file"
+            non_best = [f for f in files if "best" not in stem(f)] or files
+            choice = max(non_best, key=os.path.getmtime)
+            why = "newest file"
 
     others = sorted(
         osp.relpath(f, folder) for f in files if f != choice
@@ -267,6 +261,32 @@ def resolve_ckpt(ckpt, root):
     )
 
     return osp.abspath(choice)
+
+def ckpt_progress(ck):
+    """(epochs done, epochs planned) from a loaded training checkpoint dict, else (None, None).
+    DUSt3R-style checkpoints store 'epoch' (index of the last finished epoch; 'final' stores the total)
+    and 'args' (namespace or dict with .epochs)."""
+    if not isinstance(ck, dict):
+        return None, None
+    a = ck.get("args")
+    total = getattr(a, "epochs", None) if a is not None and not isinstance(a, dict) else None
+    if total is None and isinstance(a, dict):
+        total = a.get("epochs")
+    total = int(total) if total is not None else None
+    ep = ck.get("epoch")
+    if ep is None:
+        return None, total
+    ep = int(ep)
+    done = ep if (total is not None and ep >= total) else ep + 1
+    return done, total
+
+
+def progress_str(prog):
+    done, total = prog if prog else (None, None)
+    if done is None:
+        return "epoch ?"
+    return f"epoch {done}/{total}" if total is not None else f"epoch {done}"
+
 
 def ckpt_run_name(ckpt, root):
     """Default --model_name: the run folder name (or the file's parent folder)."""
@@ -298,7 +318,16 @@ def load_model(args, device):
                     break
         state = {k[len("module."):] if k.startswith("module.") else k: v for k, v in state.items()}
         missing, unexpected = model.load_state_dict(state, strict=False)
-        logger.info(f"Loaded {args.ckpt}: {len(missing)} missing, {len(unexpected)} unexpected keys")
+        args.ckpt_progress = ckpt_progress(ckpt)
+        done, total = args.ckpt_progress
+        if done is None and total is not None and "final" in osp.basename(args.ckpt).lower():
+            args.ckpt_progress = done, total = (total, total)   # save_final_model stores no 'epoch'
+        logger.info(f"Loaded {args.ckpt} ({progress_str(args.ckpt_progress)}): "
+                    f"{len(missing)} missing, {len(unexpected)} unexpected keys")
+        if done is not None and total is not None and done < total:
+            logger.warning("\n" + "!" * 80 + f"\n  UNFINISHED RUN: trained {done}/{total} epochs.\n"
+                           "  Its results are stored with a warning and are NOT comparable to finished runs.\n"
+                           + "!" * 80)
         if missing:
             logger.warning(f"Missing (first 10): {missing[:10]}")
         if unexpected:
@@ -1334,14 +1363,18 @@ def eval_settings(args):
 
 
 def make_record(model_name, dataset, ckpt_fp, settings, raw, raw_file, expected_sequences, source,
-                display_name=None, description=""):
+                display_name=None, description="", ckpt_prog=(None, None)):
     metrics = summarize_raw(raw, settings)
     errors, warnings = validate(metrics, raw, settings, expected_sequences)
+    done, total = ckpt_prog if ckpt_prog else (None, None)
+    if done is not None and total is not None and done < total:
+        warnings.append(f"unfinished checkpoint: {done}/{total} epochs")
     return {
         "model": model_name, "display_name": display_name, "description": description,
         "dataset": dataset, "source": source,
         "time": datetime.datetime.now().isoformat(timespec="seconds"),
-        "ckpt": ckpt_fp, "settings": settings, "code_sha": CODE_SHA,
+        "ckpt": ckpt_fp, "ckpt_progress": tuple(ckpt_prog) if ckpt_prog else (None, None),
+        "settings": settings, "code_sha": CODE_SHA,
         "host": socket.gethostname(), "slurm_job": os.environ.get("SLURM_JOB_ID"),
         "num_sequences": raw["num_sequences"], "expected_sequences": expected_sequences,
         "pm_cameras": raw["pm_cameras"],
@@ -1383,7 +1416,8 @@ def log_record(rec):
                      f"RRA/RTA@{{{','.join(map(str, RA_THRESHOLDS))}}} {ra}")
     if "pointmap" in m:
         parts.append(f"Acc {m['pointmap']['acc']:.4f} Comp {m['pointmap']['comp']:.4f} NC {m['pointmap']['nc']:.3f}")
-    logger.info(f"[{rec['model']} / {rec['dataset']}] {status}  " + "  |  ".join(parts))
+    logger.info(f"[{rec['model']} / {rec['dataset']}] {status} ({progress_str(rec.get('ckpt_progress'))})  "
+                + "  |  ".join(parts))
     for e in rec["errors"]:
         logger.error(f"[{rec['model']} / {rec['dataset']}] ERROR: {e}")
     for w in rec["warnings"]:
@@ -1399,7 +1433,7 @@ def show_store(args):
         runs = store["runs"]
     print("Showing the record the tables use (latest complete one) for every (model, dataset).")
     print(f"{'model':<12} {'dataset':<20} {'status':<10} {'seqs':>11} {'AbsRel':>7} {'AUC@30':>7} "
-          f"{'Acc':>7} {'hist':>4} {'when':<19} flags")
+          f"{'Acc':>7} {'epoch':>9} {'hist':>4} {'when':<19} flags")
     for model in sorted(runs):
         for ds in sorted(runs[model]):
             hist = runs[model][ds]
@@ -1415,6 +1449,7 @@ def show_store(args):
             flags = "; ".join(flags)
             print(f"{model:<12} {ds:<20} {'ok' if rec['complete'] else 'FLAGGED':<10} {seqs:>11} "
                   f"{f('depth', 'abs_rel'):>7} {f('camera', 'auc30'):>7} {f('pointmap', 'acc'):>7} "
+                  f"{progress_str(rec.get('ckpt_progress')).replace('epoch ', ''):>9} "
                   f"{len(hist):>4} {rec['time']:<19} {flags}")
 
 
@@ -1444,7 +1479,8 @@ def recompute(args):
                 raw = pickle.load(f)
             new = make_record(rec["model"], rec["dataset"], rec["ckpt"], rec["settings"], raw,
                               rec["raw_file"], rec["expected_sequences"], source="recompute",
-                              display_name=rec.get("display_name"), description=rec.get("description", ""))
+                              display_name=rec.get("display_name"), description=rec.get("description", ""),
+                              ckpt_prog=rec.get("ckpt_progress", (None, None)))
             append_record(store, new)
             log_record(new)
     logger.info(f"Recomputed {len(todo)} record(s) with code {CODE_SHA}")
@@ -1499,6 +1535,7 @@ def main():
         logger.info("Nothing to evaluate.")
         return
 
+    args.ckpt_progress = (None, None)
     model = load_model(args, device)
     failures = []
     for ds, name in todo:
@@ -1516,7 +1553,8 @@ def main():
             raw_file = osp.join("raw", args.model_name, f"{name}__{stamp}__{os.getpid()}.pkl")
             _atomic_pickle(raw, osp.join(args.results_dir, raw_file))   # raw first, then the index
             rec = make_record(args.model_name, name, ckpt_fp, settings, raw, raw_file, expected, source="eval",
-                              display_name=args.display_name, description=args.description)
+                              display_name=args.display_name, description=args.description,
+                              ckpt_prog=args.ckpt_progress)
             with locked_store(store_file) as store:                      # saved right after EACH dataset
                 append_record(store, rec)
             log_record(rec)

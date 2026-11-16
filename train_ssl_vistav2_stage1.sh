@@ -70,6 +70,39 @@ fi
 SRC=/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/preprocessed_data/training_lmdbs   # LMDBs are copied from here to node-local disk
 
 # ---------------------------
+# Datasets
+# ---------------------------
+TRAIN_DATASET="Hypersim_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + MegaDepth_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/megadepth_nvs.yaml') + Matterport3D_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + 100_000 @ Habitat_HM3D_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + 100_000 @ DL3DV_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/dl3dv_nvs.yaml') + 50_000 @ Mapfree_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/mapfree_nvs.yaml') + 100_000 @ ScanNet_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + 70_000 @ Arkitscenes_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml')"
+TEST_DATASET="Hypersim_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + MegaDepth_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/megadepth_nvs.yaml') + Matterport3D_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + Habitat_HM3D_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + DL3DV_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/dl3dv_nvs.yaml') + Mapfree_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/mapfree_nvs.yaml') + ScanNet_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + Arkitscenes_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml')"
+
+# ---------------------------
+# LMDBs needed by these datasets (found automatically)
+# ---------------------------
+# Every config_path in the dataset strings is read, and the *.lmdb names it mentions are kept.
+# A config that mentions none falls back to <dataset name>*.lmdb in SRC (ScanNet does not pick up ScanNet++).
+LMDBS=()
+add_lmdb() { local f=$1; [ -e "$f" ] || return 1; [[ " ${LMDBS[*]} " == *" $f "* ]] || LMDBS+=("$f"); }
+for entry in $(echo "$TRAIN_DATASET + $TEST_DATASET" | grep -oE "[A-Za-z0-9_]+_NVS\(split='[a-z]+'[^)]*config_path='[^']+'" | sed -E "s/^([A-Za-z0-9_]+)_NVS.*config_path='([^']+)'/\1|\2/" | sort -u); do
+    name=${entry%%|*}; cfg=${entry#*|}
+    found=0
+    if [ -f "$cfg" ]; then
+        for n in $(grep -oE "[A-Za-z0-9_.-]+\.lmdb" "$cfg" | sort -u); do
+            add_lmdb "${SRC}/${n}" && found=1
+        done
+    fi
+    if [ $found -eq 0 ]; then
+        shopt -s nullglob nocaseglob
+        for f in "${SRC}/${name}"*.lmdb; do
+            b=$(basename "$f")
+            [[ ${b,,} == "${name,,}pp"* || ${b,,} == "${name,,}++"* ]] && continue
+            add_lmdb "$f" && found=1
+        done
+        shopt -u nullglob nocaseglob
+    fi
+    [ $found -eq 1 ] || { echo "Error: no LMDB found in ${SRC} for ${name} (config ${cfg})"; exit 1; }
+done
+
+# ---------------------------
 # Debug output
 # ---------------------------
 echo "Submitting SSL training job with:"
@@ -79,6 +112,7 @@ echo "CPUS = $CPUS"
 echo "MEMORY = ${MEMORY}GB"
 echo "GRES = $GRES"
 [ ${#EXTRA_SBATCH[@]} -gt 0 ] && echo "EXTRA = ${EXTRA_SBATCH[*]}"
+echo "LMDBs to copy (${#LMDBS[@]}):"; for f in "${LMDBS[@]}"; do echo "  $(basename "$f")  $(du -sh "$f" | cut -f1)"; done
 
 # ---------------------------
 # Submit SLURM job
@@ -103,13 +137,13 @@ sbatch \
           trap 'rm -rf \$LMDB_DIR' EXIT && \
           echo \"start: \$(date)  restart count: \${SLURM_RESTART_COUNT:-0}\" && \
           mkdir -p \$LMDB_DIR && df -h \$LMDB_DIR && \
-          time cp ${SRC}/*.lmdb \$LMDB_DIR/ && \
+          time cp -r ${LMDBS[*]} \$LMDB_DIR/ && \
           torchrun \
           --nproc_per_node=${NUM_GPUS} \
-          --master_port=8478 \
+          --master_port=8488 \
           train_sslv2.py \
-          --train_dataset=\"Hypersim_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + MegaDepth_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/megadepth_nvs.yaml') + Matterport3D_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + 100_000 @ Habitat_HM3D_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + 100_000 @ DL3DV_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/dl3dv_nvs.yaml') + 50_000 @ Mapfree_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/mapfree_nvs.yaml') + 100_000 @ ScanNet_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + 70_000 @ Arkitscenes_NVS(split='train', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml')\" \
-          --test_dataset=\"Hypersim_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + MegaDepth_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/megadepth_nvs.yaml') + Matterport3D_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + Habitat_HM3D_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + DL3DV_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/dl3dv_nvs.yaml') + Mapfree_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/mapfree_nvs.yaml') + ScanNet_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + Arkitscenes_NVS(split='val', overfit=False, n_target_views=4, max_views=10, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml')\" \
+          --train_dataset=\"${TRAIN_DATASET}\" \
+          --test_dataset=\"${TEST_DATASET}\" \
           --model=\"vista_v2_base(lambda_b=1.0)\" \
           --base_lr=2e-4 \
           --epochs=110 \

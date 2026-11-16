@@ -28,7 +28,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 # Project imports
 from datasets import get_data_loader  # noqa: E402
-from models import vista_base, vista_large, vista_v2_base, vista_v2_large
+from models import vista_base, vista_large, vista_v2_base, vista_v2_large, vista_v4_base
 
 
 import utils.misc as misc  # noqa: E402
@@ -41,7 +41,7 @@ logger = logging.getLogger("vista_trainer")
 logging.basicConfig(level=logging.INFO)
 
 # Per-term losses returned by VistaV2 in its loss_dict
-LOSS_KEYS = ("loss_b", "loss_c")
+LOSS_KEYS = ("loss_b", "loss_c", "mse_b", "mse_c")
 
 
 def str2bool(v):
@@ -267,24 +267,25 @@ def test_ss_3d_model(model: torch.nn.Module,
             (total_loss, masked_rgb, reconstructed_rgb,
              loss_dict, b_masked_rgb, b_recon_rgb) = unpack_outputs(model(source_images, target_images))
 
-        has_b = b_recon_rgb is not None and num_clean is not None
-        num_clean = (source_images.shape[1] - b_recon_rgb.shape[1] if b_recon_rgb is not None else None)
-        
+        # B-only models (lambda_c=0) return no C reconstruction
+        has_c = reconstructed_rgb is not None
         has_b = b_recon_rgb is not None
+        num_clean = source_images.shape[1] - b_recon_rgb.shape[1] if has_b else None
 
         # ---------------------------------------------------
         # Target (C) reconstruction metrics
         # ---------------------------------------------------
-        metrics_model = compute_reconstruction_metrics(
-            to_uint8_hwc(target_images).reshape(B * S, H, W, C),
-            to_uint8_hwc(reconstructed_rgb).reshape(B * S, H, W, C),
-            device,
-            B * S,
-            metrics_to_compute=("psnr", "ssim"),
-            disable_bar=True,
-        )
-
-        metrics = {f"val_c_{k}": v for k, v in metrics_model.items()}
+        metrics = {}
+        if has_c:
+            metrics_model = compute_reconstruction_metrics(
+                to_uint8_hwc(target_images).reshape(B * S, H, W, C),
+                to_uint8_hwc(reconstructed_rgb).reshape(B * S, H, W, C),
+                device,
+                B * S,
+                metrics_to_compute=("psnr", "ssim"),
+                disable_bar=True,
+            )
+            metrics.update({f"val_c_{k}": v for k, v in metrics_model.items()})
         metrics["loss"] = total_loss.mean()
         metrics["recon_loss"] = total_loss.mean()
 
@@ -326,15 +327,16 @@ def test_ss_3d_model(model: torch.nn.Module,
             # -----------------------------------------------
             # C (decoder): individual images
             # -----------------------------------------------
-            c_gt_vis = vis_images(target_images[:n_vis])
-            c_masked_vis = vis_images(masked_rgb[:n_vis])
-            c_recon_vis = vis_images(reconstructed_rgb[:n_vis])
+            if has_c:
+                c_gt_vis = vis_images(target_images[:n_vis])
+                c_masked_vis = vis_images(masked_rgb[:n_vis])
+                c_recon_vis = vis_images(reconstructed_rgb[:n_vis])
 
-            for b in range(c_gt_vis.shape[0]):
-                for s in range(c_gt_vis.shape[1]):
-                    log_writer.add_image(f"{prefix}_val_C/gt_image_view_{b}_{s}", c_gt_vis[b, s], epoch, dataformats='HWC')
-                    log_writer.add_image(f"{prefix}_val_C/mask_image_view_{b}_{s}", c_masked_vis[b, s], epoch, dataformats='HWC')
-                    log_writer.add_image(f"{prefix}_val_C/recon_image_view_{b}_{s}", c_recon_vis[b, s], epoch, dataformats='HWC')
+                for b in range(c_gt_vis.shape[0]):
+                    for s in range(c_gt_vis.shape[1]):
+                        log_writer.add_image(f"{prefix}_val_C/gt_image_view_{b}_{s}", c_gt_vis[b, s], epoch, dataformats='HWC')
+                        log_writer.add_image(f"{prefix}_val_C/mask_image_view_{b}_{s}", c_masked_vis[b, s], epoch, dataformats='HWC')
+                        log_writer.add_image(f"{prefix}_val_C/recon_image_view_{b}_{s}", c_recon_vis[b, s], epoch, dataformats='HWC')
 
             # -----------------------------------------------
             # B (encoder): individual images
@@ -612,9 +614,10 @@ def train(args):
     if args.distributed:
         # VistaV2 with lambda_b=0 leaves the B head (encoder_norm / encoder_pred) without
         # gradients; DDP then needs find_unused_parameters=True.
-        find_unused = getattr(model, "lambda_b", None) == 0
+        # VistaV2 lambda_b=0 -> B head unused; VistaV4 lambda_c=0 -> C branch unused
+        find_unused = getattr(model, "lambda_b", None) == 0 or getattr(model, "lambda_c", None) == 0
         if find_unused:
-            logger.info("lambda_b=0: enabling find_unused_parameters for DDP")
+            logger.info("unused branch: enabling find_unused_parameters for DDP")
 
         model = torch.nn.parallel.DistributedDataParallel(
             model,

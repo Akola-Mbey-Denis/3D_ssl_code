@@ -29,6 +29,8 @@ class Vistav2(nn.Module):
         n_storage_tokens: int = 0,
         intermediate_layer_idx: Optional[Sequence[int]] = None,   # encoder blocks fed to the DPT head
         enable_camera: bool = True,
+        muskie_like: bool = True,               # heads read global-attention outputs only (C), as Muskie;
+                                                # False: cat(frame, global) per block (2C)
     ):
         super().__init__()
         self.img_size = img_size
@@ -38,6 +40,8 @@ class Vistav2(nn.Module):
         self.encoder_num_heads = encoder_num_heads
         self.patch_size = patch_size
         self.patch_start_idx = patch_start_idx
+        self.muskie_like = muskie_like
+        head_dim = embed_dim if muskie_like else 2 * embed_dim
 
         if intermediate_layer_idx is None:
             intermediate_layer_idx = even_layers(encoder_depth)
@@ -55,7 +59,7 @@ class Vistav2(nn.Module):
         )
 
         self.dpt_head = DPTHead(
-            dim_in=2 * embed_dim,
+            dim_in=head_dim,
             output_dim=output_channels,
             patch_size=patch_size,
             activation="exp",
@@ -63,13 +67,17 @@ class Vistav2(nn.Module):
             intermediate_layer_idx=list(intermediate_layer_idx),
         )
 
-        self.camera_head = CameraHead(dim_in = 2 * embed_dim, global_feat = False, model_type = "vista") if enable_camera else None
+        self.camera_head = CameraHead(dim_in=head_dim, global_feat=False, model_type="muskie_like") if enable_camera else None
 
     def forward(self, images, return_intermediate_outputs: bool = True):
 
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
-           aggregated_tokens_list, patch_start_idx = self.encoder(images=images,return_intermediate_outputs=return_intermediate_outputs)
+            aggregated_tokens_list, patch_start_idx = self.encoder(
+                images=images,
+                return_intermediate_outputs=return_intermediate_outputs,
+                global_only=self.muskie_like,
+            )
         
         aggregated_tokens_list = [t.float() for t in aggregated_tokens_list]
        

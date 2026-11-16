@@ -60,7 +60,7 @@ class Vista_LDI(nn.Module):
         )
 
         self.dpt_head = LayeredDPTHead(
-            dim_in=2 * embed_dim,
+            dim_in=embed_dim,
             num_layers=num_layers,
             predict_exist=predict_exist,
             patch_size=patch_size,
@@ -78,7 +78,7 @@ class Vista_LDI(nn.Module):
         """
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
-            aggregated_tokens_list, patch_start_idx = self.encoder(images=images, return_intermediate_outputs=return_intermediate_outputs)
+            aggregated_tokens_list, patch_start_idx = self.encoder(images=images, return_intermediate_outputs=return_intermediate_outputs, global_only = True)
 
         aggregated_tokens_list = [t.float() for t in aggregated_tokens_list]
 

@@ -389,12 +389,21 @@ class NRGBD_NVS(BaseDataset):
                     dtype=np.float32,
                 )
 
-                # NRGBD depth PNG is uint16 millimeters.
+                # # NRGBD depth PNG is uint16 millimeters.
+                # depth = depth_raw / 1000.0
+
+                # depth_mask = (
+                #     np.isfinite(depth)
+                #     & (depth > 0)
+                # )
+                # depth[~depth_mask] = 0.0
+                                # NRGBD depth PNG is uint16 millimeters.
                 depth = depth_raw / 1000.0
 
                 depth_mask = (
                     np.isfinite(depth)
-                    & (depth > 0)
+                    & (depth > 0.1)     # nothing real is closer than 10 cm; drops noisy near-zero GT
+                    & (depth < 10.0)
                 )
                 depth[~depth_mask] = 0.0
             else:

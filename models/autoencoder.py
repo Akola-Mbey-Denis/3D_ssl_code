@@ -182,21 +182,23 @@ class Encoder(nn.Module):
     # =============================================================
     # Forward
     # =============================================================
-
     def forward(
         self,
         images: torch.Tensor,
         return_intermediate_outputs: bool = False,
+        global_only: bool = False,
     ):
         """
         Args:
-            images:
-                [B, S, 3, H, W]
+            images: [B, S, 3, H, W]
+            return_intermediate_outputs: return per-layer features instead of the last tokens
+            global_only: with intermediate outputs, return only the global-attention
+                tokens [B, S, P, C] (Muskie-style readout) instead of
+                cat(frame, global) [B, S, P, 2C]
 
         Returns:
             If return_intermediate_outputs=False:
-                tokens, patch_start_idx
-
+                tokens [B, S, P, C], patch_start_idx
             If return_intermediate_outputs=True:
                 output_list, patch_start_idx
         """
@@ -204,77 +206,44 @@ class Encoder(nn.Module):
         B, S, C_in, H, W = images.shape
 
         if C_in != 3:
-            raise ValueError(
-                f"Expected 3 input channels, got {C_in}"
-            )
+            raise ValueError(f"Expected 3 input channels, got {C_in}")
 
         # ---------------------------------------------------------
         # Patch embedding
         # ---------------------------------------------------------
-
-        images = images.reshape(
-            B * S,
-            C_in,
-            H,
-            W,
-        )
-
+        images = images.reshape(B * S, C_in, H, W)
         x = self.patch_embed(images)
-
-
         _, _, C = x.shape
 
         # ---------------------------------------------------------
         # Special tokens
         # ---------------------------------------------------------
-        cls_tokens = self.cls_token.expand(B*S, -1, -1)
+        cls_tokens = self.cls_token.expand(B * S, -1, -1)
         tokens = torch.cat((cls_tokens, x), dim=1)
         _, P, C = tokens.shape
 
         # ---------------------------------------------------------
         # RoPE positions
         # ---------------------------------------------------------
-
         pos = None
-
         if self.rope is not None:
             grid_h = H // self.patch_size
             grid_w = W // self.patch_size
 
-            pos = self.position_getter(
-                B * S,
-                grid_h,
-                grid_w,
-                device=images.device,
-            )
+            pos = self.position_getter(B * S, grid_h, grid_w, device=images.device)
 
-            # Shift patch positions so special tokens occupy
-            # the prefix.
+            # Shift patch positions so special tokens occupy the prefix.
             pos = pos + 1
-
             pos_special = torch.zeros(
-                B * S,
-                self.patch_start_idx,
-                2,
-                device=images.device,
-                dtype=pos.dtype,
+                B * S, self.patch_start_idx, 2, device=images.device, dtype=pos.dtype
             )
+            pos = torch.cat([pos_special, pos], dim=1)
 
-            pos = torch.cat(
-                [
-                    pos_special,
-                    pos,
-                ],
-                dim=1,
-            )
-        
         # ---------------------------------------------------------
         # Alternating attention
         # ---------------------------------------------------------
-
         frame_idx = 0
         global_idx = 0
-
         output_list = []
 
         for _ in range(self.aa_block_num):
@@ -283,60 +252,38 @@ class Encoder(nn.Module):
             global_intermediates = []
 
             for attn_type in self.aa_order:
-
                 if attn_type == "frame":
-
-                    (
-                        tokens,
-                        frame_idx,
-                        frame_intermediates,
-                    ) = self._process_frame_attention(
-                        tokens,
-                        B,
-                        S,
-                        P,
-                        C,
-                        frame_idx,
-                        pos=pos,
+                    tokens, frame_idx, frame_intermediates = self._process_frame_attention(
+                        tokens, B, S, P, C, frame_idx, pos=pos
                     )
-
-        
                 elif attn_type == "global":
-
-                    (
-                        tokens,
-                        global_idx,
-                        global_intermediates,
-                    ) = self._process_global_attention(
-                        tokens,
-                        B,
-                        S,
-                        P,
-                        C,
-                        global_idx,
-                        pos=pos,
+                    tokens, global_idx, global_intermediates = self._process_global_attention(
+                        tokens, B, S, P, C, global_idx, pos=pos
                     )
-
                 else:
-                    raise ValueError(
-                        f"Unknown attention type: {attn_type}"
-                    )
+                    raise ValueError(f"Unknown attention type: {attn_type}")
 
             # -----------------------------------------------------
-            # Save selected intermediate features
+            # Save intermediate features
             # -----------------------------------------------------
-
             if return_intermediate_outputs:
-                for layer_idx in range(len(frame_intermediates)):
-                        output_list.append(torch.cat([frame_intermediates[layer_idx],global_intermediates[layer_idx]],dim=-1))
+                if global_only:
+                    # global tokens only: [B, S, P, C]
+                    output_list.extend(global_intermediates)
+                else:
+                    # cat(frame, global): [B, S, P, 2C]
+                    for layer_idx in range(len(frame_intermediates)):
+                        output_list.append(
+                            torch.cat(
+                                [frame_intermediates[layer_idx], global_intermediates[layer_idx]],
+                                dim=-1,
+                            )
+                        )
 
         if return_intermediate_outputs:
-            return (
-                output_list,
-                self.patch_start_idx,
-            )
+            return output_list, self.patch_start_idx
 
-        return tokens.view(B, S, P, C),  self.patch_start_idx
+        return tokens.view(B, S, P, C), self.patch_start_idx
 
     # =============================================================
     # Frame attention
@@ -645,34 +592,29 @@ class EncoderV2(nn.Module):
     # =============================================================
     # Forward
     # =============================================================
-
     def forward(
         self,
         images: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         return_intermediate_outputs: bool = False,
+        global_only: bool = False,
     ):
         """
         Args:
             images: [B, S, 3, H, W], first `num_clean` views clean, rest masked.
             mask:   [B, S - num_clean, N] bool, True = masked patch.
                     None -> all views clean (downstream / inference).
+            return_intermediate_outputs: return one feature map per alternating block.
+            global_only: with return_intermediate_outputs, return only the output of each
+                    global-attention block ([B, S, P, C], cross-view mixed, as Muskie's
+                    AABlock output) instead of cat(frame, global) ([B, S, P, 2C]).
 
         Returns:
             If return_intermediate_outputs=False:
                 tokens of all views [B, S, P, C], patch_start_idx
             If return_intermediate_outputs=True:
-                list of [B, S, P, 2C], patch_start_idx
+                list of [B, S, P, 2C] (or [B, S, P, C] with global_only), patch_start_idx
         """
-        # B, S, C_in, H, W = images.shape
-        # if C_in != 3:
-        #     raise ValueError(f"Expected 3 input channels, got {C_in}")
-
-        # num_clean = S if mask is None else self.num_clean
-        # S_m = S - num_clean
-        # if mask is not None and not 0 < num_clean < S:
-        #     raise ValueError(f"Got {S} views but num_clean={num_clean}; need at least one masked view")
-
         B, S, C_in, H, W = images.shape
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
@@ -736,16 +678,18 @@ class EncoderV2(nn.Module):
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
             if return_intermediate_outputs:
-                for i in range(len(frame_intermediates)):
-                    output_list.append(
-                        torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
-                    )
+                if global_only:
+                    output_list.extend(global_intermediates)                 # [B, S, P, C] each
+                else:
+                    for i in range(len(frame_intermediates)):
+                        output_list.append(
+                            torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
+                        )
 
         if return_intermediate_outputs:
             return output_list, self.patch_start_idx
 
         return tokens.view(B, S, P, C), self.patch_start_idx
-
     # =============================================================
     # Frame attention: [B*S, P, C]
     # =============================================================
@@ -791,12 +735,202 @@ class EncoderV2(nn.Module):
         return tokens, global_idx, intermediates
         
 
+# class Decoder(nn.Module):
+#     """
+#     Cross-attention decoder.
+
+#     Input:
+#         target_tokens:    [B, S_target, P, D]                    D = decoder_embed_dim
+#         reference_tokens: [B, S_ref, patch_start_idx + P, C]     C = embed_dim
+#                           (CLS / storage tokens first, then patches)
+
+#     Each block:
+#         Q   = target tokens      (target positions)
+#         K,V = reference tokens   (reference positions; prefix tokens at position 0)
+
+#     Returns:
+#         [B, S_target*P, D]
+#     """
+
+#     def __init__(
+#         self,
+#         *,
+#         embed_dim: int = 1024,
+#         decoder_embed_dim: int = 512,
+#         depth: int = 8,
+#         num_heads: int = 16,
+#         mlp_ratio: float = 4.0,
+#         qkv_bias: bool = True,
+#         proj_bias: bool = True,
+#         qk_norm: bool = True,
+#         rope_freq: int = 0,
+#         init_values: float = 0.01,
+#         norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
+#         cross_block_fn: Callable[..., nn.Module] = CrossAttentionBlock,
+#         gradient_checkpointing: bool = True,
+#         **kwargs,
+#     ):
+#         super().__init__()
+
+#         self.embed_dim = embed_dim
+#         self.decoder_embed_dim = decoder_embed_dim
+#         self.depth = depth
+#         self.gradient_checkpointing = gradient_checkpointing
+
+#         # ====================================================
+#         # Reference feature projection
+#         # ====================================================
+
+#         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
+
+#         # ====================================================
+#         # RoPE
+#         # ====================================================
+
+#         self.rope = RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 else None
+#         self.position_getter = PositionGetter() if self.rope is not None else None
+
+#         # ====================================================
+#         # Cross-attention
+#         #
+#         # Q   = target
+#         # K,V = reference
+#         # ====================================================
+
+#         self.cross_blocks = nn.ModuleList(
+#             [
+#                 cross_block_fn(
+#                     dim=decoder_embed_dim,
+#                     num_heads=num_heads,
+#                     mlp_ratio=mlp_ratio,
+#                     qkv_bias=qkv_bias,
+#                     proj_bias=proj_bias,
+#                     init_values=init_values,
+#                     qk_norm=qk_norm,
+#                     norm_layer=norm_layer,
+#                     rope=self.rope,
+#                 )
+#                 for _ in range(depth)
+#             ]
+#         )
+
+#         self.init_weights()
+
+#     # ========================================================
+#     # Initialization
+#     # ========================================================
+
+#     def init_weights(self):
+#         nn.init.trunc_normal_(self.decoder_embed.weight, std=0.02)
+#         if self.decoder_embed.bias is not None:
+#             nn.init.zeros_(self.decoder_embed.bias)
+
+#     # ========================================================
+#     # Build 2D positions
+#     # ========================================================
+
+#     def build_positions(self, batch_size: int, height: int, width: int, device):
+#         """
+#         Returns:
+#             [B*num_views, H*W, 2]  or None if RoPE is disabled
+#         """
+#         if self.position_getter is None:
+#             return None
+#         return self.position_getter(batch_size, height, width, device=device)
+
+#     # ========================================================
+#     # Forward
+#     # ========================================================
+
+#     def forward(
+#         self,
+#         target_tokens: torch.Tensor,
+#         reference_tokens: torch.Tensor,
+#         patch_start_idx: int = 1,
+#     ):
+#         """
+#         target_tokens:    [B, S_target, P, D]
+#         reference_tokens: [B, S_ref, patch_start_idx + P, C]
+#         patch_start_idx:  number of prefix tokens per reference view (0 = patches only)
+
+#         Returns:
+#             [B, S_target*P, D]
+#         """
+
+#         B, S_target, P, D = target_tokens.shape
+#         _, S_ref, P_ref, _ = reference_tokens.shape
+
+#         # assert P_ref == P + patch_start_idx, (
+#         #     f"reference has {P_ref} tokens per view, expected {P} patches + {patch_start_idx} prefix tokens"
+#         # )
+
+#         H_patch = W_patch = int(math.sqrt(P))
+#         assert H_patch * W_patch == P, f"P={P} is not a square"
+
+#         # Project reference features (prefix + patches): [B, S_ref*P_ref, D]
+#         context_tokens = self.decoder_embed(reference_tokens).reshape(B, S_ref * P_ref, D)
+
+#         # ====================================================
+#         # Positions
+#         #
+#         # Patches start at 1; position 0 is reserved for the
+#         # prefix tokens (same convention as the encoder).
+#         # RoPE is relative, so the +1 shift does not change
+#         # patch-to-patch attention.
+#         # ====================================================
+
+#         target_pos = self.build_positions(B * S_target, H_patch, W_patch, target_tokens.device)
+#         reference_pos = self.build_positions(B * S_ref, H_patch, W_patch, target_tokens.device)
+
+#         if target_pos is not None:
+#             target_pos = (target_pos + 1).reshape(B, S_target * P, -1)            # [B, S_target*P, 2]
+
+#             prefix_pos = torch.zeros(
+#                 B * S_ref, patch_start_idx, 2,
+#                 device=reference_pos.device, dtype=reference_pos.dtype,
+#             )
+#             reference_pos = torch.cat([prefix_pos, reference_pos + 1], dim=1)     # [B*S_ref, P_ref, 2]
+#             reference_pos = reference_pos.reshape(B, S_ref * P_ref, -1)           # [B, S_ref*P_ref, 2]
+
+#         # ====================================================
+#         # Cross attention
+#         #
+#         # Q   = target       [B, S_target*P,   D]
+#         # K,V = reference    [B, S_ref*P_ref,  D]
+#         # ====================================================
+
+#         x = target_tokens.reshape(B, S_target * P, D)
+
+#         for block in self.cross_blocks:
+
+#             if self.gradient_checkpointing and self.training:
+#                 x = torch.utils.checkpoint.checkpoint(
+#                     block,
+#                     query_tokens=x,
+#                     context_tokens=context_tokens,
+#                     query_pos=target_pos,
+#                     context_pos=reference_pos,
+#                     use_reentrant=False,
+#                 )
+#             else:
+#                 x = block(
+#                     query_tokens=x,
+#                     context_tokens=context_tokens,
+#                     query_pos=target_pos,
+#                     context_pos=reference_pos,
+#                 )
+
+#         return x
+
+
 class Decoder(nn.Module):
     """
     Cross-attention decoder.
 
     Input:
-        target_tokens:    [B, S_target, P, D]                    D = decoder_embed_dim
+        target_tokens:    [B, S_target, t_psi + P, D]            D = decoder_embed_dim
+                          (optional target prefix, e.g. CLS, first; t_psi is
+                          inferred: target patches = reference patches)
         reference_tokens: [B, S_ref, patch_start_idx + P, C]     C = embed_dim
                           (CLS / storage tokens first, then patches)
 
@@ -805,7 +939,7 @@ class Decoder(nn.Module):
         K,V = reference tokens   (reference positions; prefix tokens at position 0)
 
     Returns:
-        [B, S_target*P, D]
+        [B, S_target*(t_psi + P), D]   (prefix tokens included; drop them after)
     """
 
     def __init__(
@@ -905,20 +1039,26 @@ class Decoder(nn.Module):
         patch_start_idx: int = 0,
     ):
         """
-        target_tokens:    [B, S_target, P, D]
+        target_tokens:    [B, S_target, t_psi + P, D]   (t_psi = 0 without a target CLS)
         reference_tokens: [B, S_ref, patch_start_idx + P, C]
         patch_start_idx:  number of prefix tokens per reference view (0 = patches only)
 
         Returns:
-            [B, S_target*P, D]
+            [B, S_target*(t_psi + P), D]
         """
 
-        B, S_target, P, D = target_tokens.shape
+        B, S_target, T, D = target_tokens.shape
         _, S_ref, P_ref, _ = reference_tokens.shape
 
-        assert P_ref == P + patch_start_idx, (
-            f"reference has {P_ref} tokens per view, expected {P} patches + {patch_start_idx} prefix tokens"
-        )
+        # Target and reference share the patch grid, so any extra target tokens are
+        # a target prefix (e.g. CLS): 0 without one, so the old behaviour is unchanged.
+        P = P_ref - patch_start_idx
+        t_psi = T - P
+        assert t_psi >= 0, f"target has {T} tokens, fewer than the {P} reference patches"
+
+        # assert P_ref == P + patch_start_idx, (
+        #     f"reference has {P_ref} tokens per view, expected {P} patches + {patch_start_idx} prefix tokens"
+        # )
 
         H_patch = W_patch = int(math.sqrt(P))
         assert H_patch * W_patch == P, f"P={P} is not a square"
@@ -939,7 +1079,12 @@ class Decoder(nn.Module):
         reference_pos = self.build_positions(B * S_ref, H_patch, W_patch, target_tokens.device)
 
         if target_pos is not None:
-            target_pos = (target_pos + 1).reshape(B, S_target * P, -1)            # [B, S_target*P, 2]
+            target_prefix = torch.zeros(
+                B * S_target, t_psi, 2,
+                device=target_pos.device, dtype=target_pos.dtype,
+            )
+            target_pos = torch.cat([target_prefix, target_pos + 1], dim=1)       # [B*S_target, T, 2]
+            target_pos = target_pos.reshape(B, S_target * T, -1)                  # [B, S_target*T, 2]
 
             prefix_pos = torch.zeros(
                 B * S_ref, patch_start_idx, 2,
@@ -951,11 +1096,11 @@ class Decoder(nn.Module):
         # ====================================================
         # Cross attention
         #
-        # Q   = target       [B, S_target*P,   D]
+        # Q   = target       [B, S_target*T,   D]
         # K,V = reference    [B, S_ref*P_ref,  D]
         # ====================================================
 
-        x = target_tokens.reshape(B, S_target * P, D)
+        x = target_tokens.reshape(B, S_target * T, D)
 
         for block in self.cross_blocks:
 
@@ -977,8 +1122,6 @@ class Decoder(nn.Module):
                 )
 
         return x
-
-
 class Predictor(nn.Module):
     """
     JEPA predictor: cross-attention from target tokens to source tokens.

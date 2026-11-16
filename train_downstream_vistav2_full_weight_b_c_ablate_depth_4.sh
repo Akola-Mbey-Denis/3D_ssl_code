@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GPU_TYPE="b200"
+GPU_TYPE="h200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
 EPOCHS=40
@@ -89,7 +89,7 @@ echo "EPOCHS = $EPOCHS"
 
 sbatch \
   --account=torch_pr_41_courant \
-  --time=36:00:00 \
+  --time=16:00:00 \
   --mem=${MEMORY}G \
   --gres=${GRES} \
   --cpus-per-task=${CPUS} \
@@ -123,4 +123,4 @@ sbatch \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav2_full_weight_b_c_heads_decoder_depth_4_scene_norm_patch_tokens_pose_base_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep_latest/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav2_full_weight_global_token_b_c_heads_decoder_depth_4_scene_norm_patch_tokens_pose_base_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep_latest/\""

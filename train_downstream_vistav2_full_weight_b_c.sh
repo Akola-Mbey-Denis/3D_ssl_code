@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GPU_TYPE="b200"
+GPU_TYPE="h200"
 NUM_GPUS=2
 MEM_OVERRIDE=""
 EPOCHS=40
@@ -114,7 +114,7 @@ echo "LMDBS  = $(du -ch $LMDB_FILES | tail -1 | cut -f1) in ${#LMDB_NAMES[@]} da
 # ---------------------------
 
 sbatch \
-  --account=torch_pr_41_courant \
+  --account=torch_pr_41_tandon_advanced \
   --time=12:00:00 \
   --mem=${MEMORY}G \
   --gres=${GRES} \
@@ -149,4 +149,4 @@ sbatch \
           --keep_freq=10 \
           --eval_freq=5 \
           --print_freq=100 \
-          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav2_full_weight_b_c_heads_scene_norm_patch_tokens_pose_base_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep_latest/\""
+          --output_dir=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vistav2_full_weight_b_c_heads_scene_norm_patch_global_tokens_pose_base_model_downstream_depth_camera_all_datasets_model_224_x_224_${EPOCHS}ep_latest/\""

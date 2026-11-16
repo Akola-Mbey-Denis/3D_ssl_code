@@ -287,7 +287,7 @@ class VistaV3(nn.Module):
             num_heads=encoder_num_heads,
             n_storage_tokens=n_storage_tokens,
             rope_freq=rope_freq,
-            num_clean=num_clean,
+            # num_clean=num_clean,
         )
 
         # ====================================================

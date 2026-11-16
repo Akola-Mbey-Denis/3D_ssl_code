@@ -43,6 +43,24 @@ python -m visualizations.visualize_ldis --model_name poincar3 --model "vista_bas
 
 
 
+# visualize_ssl_features
+#PCA visualizations
+
+python -m visualizations.visualize_ssl_features --model_name vista --model vista_basev2_downstream --ckpt vistav2_full_weight_b_c_heads_scene_norm_patch_tokens_pose_base_model_downstream_depth_camera_all_datasets_model_224_x_224_40ep_latest --dataset "ScanNetPP_NVS(split='vis', img_size=224, n_target_views=2,  load_depth=True, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')"  --out_dir "./cvpr2027_results_visuals/figures/3d_ssl_pc_feature_scannet_pp" --num_workers 4 
+
+python -m visualizations.visualize_ssl_features --model_name vista_new --model vista_basev2_downstream --ckpt vista_v2_full_loss_b_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations_more_context --dataset "ScanNetPP_NVS(split='vis', img_size=224, n_target_views=2,  load_depth=True, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')"  --out_dir "./cvpr2027_results_visuals/figures/3d_ssl_pc_feature_scannet_pp" --num_workers 4 
+
+
+python -m visualizations.visualize_ssl_features --model_name muskie --model muskie_base_downstream --ckpt muskie_scene_norm_base_default_model_downstream_depth_camera_all_datasets_model_224_x_224_40ep  --dataset "ScanNetPP_NVS(split='vis', img_size=224, n_target_views=2,  load_depth=True, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')"  --out_dir "./cvpr2027_results_visuals/figures/3d_ssl_pc_feature_scannet_pp" --num_workers 4 
+
+python -m visualizations.visualize_ssl_features --model_name mae --model mae_base_downstream --ckpt mae_base_scene_norm_patch_tokens_model_downstream_depth_camera_all_datasets_model_224_x_224_40ep  --dataset "ScanNetPP_NVS(split='vis', img_size=224, n_target_views=2,  load_depth=True, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')"  --out_dir "./cvpr2027_results_visuals/figures/3d_ssl_pc_feature_scannet_pp" --num_workers 4 
+
+python -m visualizations.visualize_ssl_features --model_name mum --model mum_base_downstream --ckpt mum_base_scene_norm_patch_tokens_default_random_masking_75_model_downstream_depth_camera_all_datasets_model_224_x_224_40ep  --dataset "ScanNetPP_NVS(split='vis', img_size=224, n_target_views=2,  load_depth=True, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')"  --out_dir "./cvpr2027_results_visuals/figures/3d_ssl_pc_feature_scannet_pp" --num_workers 4 
+
+python -m visualizations.visualize_ssl_features --model_name poincar3 --model "poincar3_large_ldi(num_layers=4)" --dataset "ScanNetPP_NVS(split='vis', img_size=224, n_target_views=2,  load_depth=True, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')" --out_dir "./cvpr2027_results_visuals/figures/3d_ssl_pc_feature_scannet_pp" --num_workers 4
+
+
+
 
 python -m visualizations.visualize_ldi --model_name vista --model "vista_base_ldi(num_layers=4)" --ckpt vista_shared_dpt_prediction_features_base_model_downstream_ldi_scannetpp_max_views_4_bs64_model_224_x_224_140ep --dataset "ScannetPP_LDI(split='val', max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_pp_ldi.yaml')" --indices 0,12,40 --out_dir "./cvpr2027_results_visuals/figures/ldi_scannetpp_vis" --num_workers 4
 

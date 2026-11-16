@@ -1,28 +1,3 @@
-import numpy as np
-import torch
-from typing import Optional, Dict
-from torchvision import transforms
-from PIL import Image
-
-
-
-def get_image_augmentation():
-    return transforms.Compose([
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ToTensor()
-    ])
-
-
-
-def get_image_augmentation():
-    return transforms.Compose([
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ToTensor()
-    ])
-
-
-
-
 import random
 from dataclasses import dataclass
 
@@ -31,6 +6,24 @@ import torch
 import torchvision.transforms as TF
 import torchvision.transforms.functional as TFF
 from PIL import Image
+
+
+
+
+def get_image_augmentation():
+    return transforms.Compose([
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor()
+    ])
+
+
+
+def get_image_augmentation():
+    return transforms.Compose([
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor()
+    ])
+
 
 
 class PhotometricAug:
@@ -106,48 +99,85 @@ class PhotometricAug:
         # Independent per-frame jitter (re-samples params each call).
         return [self.transform(f) for f in frames]
         
-# def get_image_augmentation(
-#     color_jitter: Optional[Dict[str, float]] = None,
-#     gray_scale: bool = True,
-#     gau_blur: bool = True,
-# ) -> Optional[transforms.Compose]:
-#     """Same augmentations as before, but applied on the PIL image; ToTensor is LAST (fast PIL code path)."""
-#     default_jitter = {"brightness": 0.2, "contrast": 0.2, "saturation": 0.2, "hue": 0.05, "p": 0.8}
-#     if color_jitter is not None:
-#         if not isinstance(color_jitter, dict):
-#             raise ValueError("color_jitter must be a dictionary or None")
-#         effective_jitter = {**default_jitter, **color_jitter}
-#     else:
-#         effective_jitter = default_jitter
+class SimpleAug:
+    """
+    Sequence-consistent augmentation for SSL pixel-reconstruction pre-training.
 
-#     transform_list = [
-#         transforms.RandomApply(
-#             [transforms.ColorJitter(
-#                 brightness=effective_jitter["brightness"],
-#                 contrast=effective_jitter["contrast"],
-#                 saturation=effective_jitter["saturation"],
-#                 hue=effective_jitter["hue"],
-#             )],
-#             p=effective_jitter["p"],
-#         )
-#     ]
-#     if gray_scale:
-#         transform_list.append(transforms.RandomGrayscale(p=0.05))
-#     if gau_blur:
-#         transform_list.append(transforms.RandomApply([transforms.GaussianBlur(5, sigma=(0.1, 1.0))], p=0.05))
+    Horizontal flip, colour jitter (brightness / contrast / saturation / hue) and random
+    grayscale. Every random decision is drawn ONCE per sequence and applied identically to
+    all frames, so a target view is always augmented exactly like its sources and stays
+    predictable from them. No crop / resize and no ImageNet Normalize: outputs stay in [0, 1].
 
-#     transform_list.append(transforms.ToTensor())          # last: PIL -> float tensor in [0,1]
-#     return transforms.Compose(transform_list)
+    IMAGES ONLY: depth maps and intrinsics are not updated.
+    """
 
+    @dataclass(frozen=True)
+    class Cfg:
+        enabled: bool = True
+        hflip_prob: float = 0.5
+        jitter_prob: float = 0.8
+        brightness: float = 0.4
+        contrast: float = 0.4
+        saturation: float = 0.4
+        hue: float = 0.1
+        grayscale_prob: float = 0.2
 
-class FastToTensor:
-    """Drop-in for tvf.ToTensor(): PIL / numpy HxWxC (uint8 or float [0,1]) -> float32 tensor (C,H,W) in [0,1]."""
-    def __call__(self, img):
+    def __init__(self, cfg: "SimpleAug.Cfg | None" = None) -> None:
+        self.cfg = cfg or SimpleAug.Cfg()
+
+    @staticmethod
+    def to_tensor(img) -> torch.Tensor:
+        """PIL / numpy (H, W, 3) / tensor (3, H, W) or (H, W, 3) -> float tensor (3, H, W) in [0, 1]."""
+        if isinstance(img, torch.Tensor):
+            t = img.float()
+            if t.ndim == 3 and t.shape[0] != 3 and t.shape[-1] == 3:
+                t = t.permute(2, 0, 1)
+            return t / 255.0 if t.max() > 1.0 else t
         if isinstance(img, Image.Image):
-            img = np.asarray(img)                                   # uint8 HxWxC, no copy
-        if img.ndim == 2:
-            img = img[:, :, None]
-        t = torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1)))
-        if t.dtype == torch.uint8:
-            return t.float().div_(255.0)
-        return t.float()                                            # float64 -> float32, already [0,1]
+            img = np.asarray(img.convert("RGB"))
+        arr = np.asarray(img)
+        t = torch.from_numpy(np.ascontiguousarray(arr)).float()
+        if t.ndim == 3 and t.shape[-1] == 3:
+            t = t.permute(2, 0, 1)
+        return t / 255.0 if arr.dtype == np.uint8 or t.max() > 1.0 else t
+
+    @staticmethod
+    def _factor(strength: float):
+        return random.uniform(max(0.0, 1.0 - strength), 1.0 + strength) if strength > 0 else None
+
+    def _sample_params(self) -> dict:
+        c = self.cfg
+        p = {"flip": random.random() < c.hflip_prob, "jitter": None,
+             "gray": random.random() < c.grayscale_prob}
+        if random.random() < c.jitter_prob:
+            ops = []
+            if (f := self._factor(c.brightness)) is not None:
+                ops.append((TFF.adjust_brightness, f))
+            if (f := self._factor(c.contrast)) is not None:
+                ops.append((TFF.adjust_contrast, f))
+            if (f := self._factor(c.saturation)) is not None:
+                ops.append((TFF.adjust_saturation, f))
+            if c.hue > 0:
+                ops.append((TFF.adjust_hue, random.uniform(-c.hue, c.hue)))
+            random.shuffle(ops)  # random order, same order for every frame
+            p["jitter"] = ops
+        return p
+
+    @staticmethod
+    def _apply(img: torch.Tensor, p: dict) -> torch.Tensor:
+        if p["flip"]:
+            img = TFF.hflip(img)
+        if p["jitter"]:
+            for fn, v in p["jitter"]:
+                img = fn(img, v)
+        if p["gray"]:
+            img = TFF.rgb_to_grayscale(img, num_output_channels=3)
+        return img.clamp(0.0, 1.0)
+
+    def __call__(self, frames: list, train: bool = True) -> list[torch.Tensor]:
+        """frames: list of PIL / numpy / tensor images. Returns list of (3, H, W) tensors in [0, 1]."""
+        frames = [self.to_tensor(f) for f in frames]
+        if not train or not self.cfg.enabled:
+            return frames
+        p = self._sample_params()  # one draw per sequence
+        return [self._apply(f, p) for f in frames]

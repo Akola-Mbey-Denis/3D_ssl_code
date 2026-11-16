@@ -21,7 +21,11 @@ DPT_OUT_CHANNELS = {
 
 
 class Vista(nn.Module):
-    """Encoder + DPT depth head (+ optional camera head)."""
+    """Frozen encoder + DPT depth head (+ optional camera head).
+
+    muskie_like=True (default): heads read only the global-attention tokens ([B, S, P, C]),
+    as Muskie does. muskie_like=False: heads read cat(frame, global) ([B, S, P, 2C]).
+    """
 
     def __init__(
         self,
@@ -38,6 +42,7 @@ class Vista(nn.Module):
         n_storage_tokens: int = 0,
         intermediate_layer_idx: Optional[Sequence[int]] = None,   # encoder blocks fed to the DPT head
         enable_camera: bool = True,
+        muskie_like: bool = True,                                  # global tokens only
     ):
         super().__init__()
         self.img_size = img_size
@@ -47,6 +52,7 @@ class Vista(nn.Module):
         self.encoder_num_heads = encoder_num_heads
         self.patch_size = patch_size
         self.patch_start_idx = patch_start_idx
+        self.muskie_like = muskie_like
 
         if intermediate_layer_idx is None:
             intermediate_layer_idx = even_layers(encoder_depth)
@@ -69,8 +75,11 @@ class Vista(nn.Module):
             n_storage_tokens=n_storage_tokens,
         )
 
+        # global tokens only -> C ; cat(frame, global) -> 2C
+        head_dim = embed_dim if muskie_like else 2 * embed_dim
+
         self.dpt_head = DPTHead(
-            dim_in=2 * embed_dim,                                  # concat[frame, global]
+            dim_in=head_dim,
             output_dim=output_channels,
             patch_size=patch_size,
             activation="exp",
@@ -80,7 +89,7 @@ class Vista(nn.Module):
             intermediate_layer_idx=list(intermediate_layer_idx),
         )
 
-        self.camera_head = CameraHead(dim_in = 2 * embed_dim, global_feat=False, model_type="vista") \
+        self.camera_head = CameraHead(dim_in=head_dim, global_feat=False, model_type="muskie_like") \
             if enable_camera else None
 
     def forward(self, images, return_intermediate_outputs: bool = True):
@@ -88,7 +97,10 @@ class Vista(nn.Module):
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=dtype):
             aggregated_tokens_list, patch_start_idx = self.encoder(
-                images=images, return_intermediate_outputs=return_intermediate_outputs)
+                images=images,
+                return_intermediate_outputs=return_intermediate_outputs,
+                global_only=self.muskie_like,
+            )
 
         aggregated_tokens_list = [t.float() for t in aggregated_tokens_list]
 

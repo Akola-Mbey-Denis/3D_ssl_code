@@ -4,6 +4,7 @@
 from .batched_sampler import BatchedRandomSampler  # noqa
 from .habitat_hm3d_NVS import Habitat_HM3D_NVS
 from .hypersim_NVS import Hypersim_NVS
+from .hypersim_NVS_test import Hypersim_NVS_V2
 from .taskonomy_NVS import Taskonomy_NVS
 from .replica_NVS import Replica_NVS
 from .matterport_NVS import Matterport3D_NVS
