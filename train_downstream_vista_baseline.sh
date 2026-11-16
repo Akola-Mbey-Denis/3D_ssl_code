@@ -120,10 +120,10 @@ sbatch \
   --gres=${GRES} \
   --cpus-per-task=${CPUS} \
   --constraint=${GPU_TYPE} \
-  --job-name="vista_v2downstream_${EPOCHS}ep_${GPU_TYPE}_${NUM_GPUS}gpu" \
+  --job-name="vbaseline_v2downstream_${EPOCHS}ep_${GPU_TYPE}_${NUM_GPUS}gpu" \
   "${EXTRA_SBATCH[@]}" \
-  --output=vista_v2downstream_training/%j.out \
-  --error=vista_v2downstream_training/%j.err \
+  --output=visb_v2downstream_training/%j.out \
+  --error=visb_v2downstream_training/%j.err \
   --wrap="source /projects/rps/dff6142/fouheylab/dma9300/miniconda3/etc/profile.d/conda.sh && \
           conda activate mast3r && \
           cd /projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/ && \
@@ -140,7 +140,7 @@ sbatch \
           --train_dataset=\"Hypersim_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + Matterport3D_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + 100_000 @ Habitat_HM3D_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + 100_000 @ ScanNet_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + 70_000 @ Arkitscenes_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml') + 100_000 @ ScanNetPP_NVS(split='train', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')\" \
           --test_dataset=\"Hypersim_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/hypersim_nvs.yaml') + Taskonomy_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/taskonomy_nvs.yaml') + Replica_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/replica_nvs.yaml') + Matterport3D_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/matterport3d_nvs.yaml') + Habitat_HM3D_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/habitat_hm3d_nvs.yaml') + ScanNet_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannet_nvs.yaml') + Arkitscenes_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/arkitscene_nvs.yaml') + ScanNetPP_NVS(split='val', overfit=False, load_depth=True, n_target_views=2, max_views=4, config_path='/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/configs/scannetpp_nvs.yaml')\" \
           --model=\"vista_basev2_downstream()\" \
-          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_v2_full_loss_b_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
+          --ckpt_path=\"/projects/rps/dff6142/fouheylab/dma9300/3d_ssl_project/checkpoints/vista_baseline_base_model_ssl_all_datasets_model_224_x_224_correct_augmentations\" \
           --lr=2e-4 \
           --epochs=${EPOCHS} \
           --batch_size=128 \
